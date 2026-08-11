@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src"],
+  // El renderer de React Native se typechea en la app que lo consume (que sí
+  // tiene react-native instalado). Meter react-native como devDependency acá
+  // serian ~100 MB para verificar un archivo.
+  "exclude": ["src/native"]
+}
