@@ -5,14 +5,21 @@
   "license": "UNLICENSED",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./web": "./src/web/index.tsx",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./web": {
+      "types": "./dist/web/index.d.ts",
+      "default": "./dist/web/index.js"
+    },
     "./native": "./src/native/index.tsx"
   },
   "files": [
+    "dist",
     "src",
     "README.md"
   ],
@@ -20,7 +27,9 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build"
   },
   "peerDependencies": {
     "react": ">=17",
@@ -38,5 +47,6 @@
     "@types/react": "^18.3.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"
-  }
+  },
+  "module": "./dist/index.js"
 }

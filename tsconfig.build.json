@@ -1,0 +1,43 @@
+// Build del paquete — SOLO para emitir. El typecheck de desarrollo sigue siendo
+// `tsconfig.json` (que es `noEmit`).
+//
+// POR QUÉ EXISTE. Este paquete se consume de dos formas distintas y hasta ahora
+// sólo funcionaba una:
+//   · erp-mobile lo resuelve con un hook de Metro que apunta a `src/` — Metro
+//     transpila TSX sin problema, así que la fuente le alcanza.
+//   · El ERP web lo resolvía con un alias de Vite a `../multiplex-seatmap`, que
+//     es un HERMANO del repo. Andaba en la máquina de desarrollo y **no puede**
+//     andar en el build de Vercel, donde se clona sólo el repo del ERP. Y el
+//     problema estuvo latente porque nadie importaba el paquete de verdad: el
+//     wrapper existía pero se tree-shakeaba.
+// Con un `dist` de JS + tipos, el ERP lo declara como dependencia normal y no
+// hay que adivinar nada del bundler.
+//
+// `prepare` corre esto solo cuando alguien instala desde git, así que el `dist`
+// NO se versiona: se construye en cada instalación.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    // `allowImportingTsExtensions` sólo se permite con `noEmit`. Las fuentes
+    // importan sin extensión, así que no hace falta.
+    "allowImportingTsExtensions": false
+  },
+  "include": ["src"],
+  // `src/native` queda afuera por el mismo motivo que en el tsconfig de
+  // desarrollo: se typechea en la app que lo consume, que sí tiene react-native.
+  // Su entrada del `exports` apunta a la FUENTE — Metro la transpila igual, y es
+  // el único que la usa.
+  //
+  // Los tests tampoco se emiten: son del paquete, no de quien lo instala.
+  "exclude": [
+    "src/native",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx"
+  ]
+}
