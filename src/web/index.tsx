@@ -16,8 +16,14 @@
  * paquete para que las butacas pierdan su contenedor y se apilen contra el
  * viewport. Verificado — pasó de verdad.
  *
- * RESPONSIVE: el gutter de las letras queda FIJO y solo scrollea la zona de
- * butacas, así en un celular no perdés la referencia de fila mientras paneás.
+ * RESPONSIVE — tres piezas que se combinan:
+ *   1. la sala SIEMPRE entra a lo ancho (`ajuste: 'ancho'`), así nunca se
+ *      deforma la escala para que algo «entre»;
+ *   2. si la pantalla es angosta y la sala es más ancha que profunda, se acuesta
+ *      VERTICAL (girada 90°): la pantalla del cine a la izquierda, cada fila una
+ *      columna. Se scrollea con el pulgar hacia abajo, que es el gesto natural;
+ *   3. el ZOOM lo maneja quien mira. Es un multiplicador de la escala, así que
+ *      no puede romper el dibujo: agranda los dos ejes por igual.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -29,20 +35,23 @@ import type {
   EstadoButaca,
   FilaButacas,
   MotivoRechazo,
+  Orientacion,
   PlanoSala,
   ReglasSeleccion,
   TemaButacas,
 } from '../core';
 
 const LABEL_W = 20;
-/** Lado mínimo de la butaca cuando hay que TOCARLA. */
-const MIN_TACTIL = 28;
-/**
- * Techo del lado de la butaca en web. Más alto que el del núcleo (18) porque en
- * una pantalla grande una butaca de 18 px se ve diminuta y el mapa deja de
- * crecer mucho antes de llenar el contenedor.
- */
+/** Techo del lado de la butaca a zoom 1. En web una de 18 px se ve diminuta. */
 const MAX_WEB = 32;
+/** Lo que ocupa la barra de PANTALLA cuando va al costado (orientación vertical). */
+const PANTALLA_W = 28;
+/** Por debajo de esto, `orientacion: 'auto'` considera la pantalla «angosta». */
+const UMBRAL_ANGOSTO = 560;
+
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 4;
+const ZOOM_PASO = 0.5;
 
 /** Mide el contenedor. Es el equivalente web del `onLayout` de RN. */
 function useAnchoContenedor() {
@@ -63,25 +72,36 @@ function useAnchoContenedor() {
 export interface PropsVista {
   filas: FilaButacas[];
   /**
-   * Cómo se elige la escala. Default: `'ancho'` en solo vista (la sala entra
-   * entera) y `'tactil'` cuando el mapa es interactivo (la butaca nunca baja del
-   * mínimo tocable y, si no entra, se scrollea). Se puede forzar.
+   * Cómo se elige la escala. Default `'ancho'`: la sala entra completa y no se
+   * deforma nada. `'tactil'` fuerza un lado mínimo y desborda — solo si sabés
+   * que lo querés; para tocar con el dedo es preferible el zoom.
    */
   ajuste?: AjusteEscala;
-  /** Lado mínimo de la butaca en modo táctil. Default 28. */
+  /**
+   * Cómo se acuesta la sala. `'auto'` (default) la pone VERTICAL en pantallas
+   * angostas cuando la sala es más ancha que profunda.
+   */
+  orientacion?: Orientacion;
+  /** Controles de zoom. Default: visibles. */
+  zoomControls?: boolean;
+  /** Zoom inicial. Default 1 (la sala entera). */
+  zoomInicial?: number;
+  /** Lado mínimo de la butaca en `ajuste: 'tactil'`. */
   minSeat?: number;
-  /** Techo del lado de la butaca, para que no se agrande al pedo en desktop. */
+  /** Techo del lado de la butaca a zoom 1. */
   maxSeat?: number;
   /**
    * Número dentro de la butaca. `'auto'` (default) lo prende solo cuando la
    * butaca da el ancho: a la escala de sala entera el dígito no se lee y solo
-   * ensucia el color, que es la señal que de verdad se usa.
+   * ensucia el color, que es la señal que de verdad se usa. Con zoom aparece solo.
    */
   mostrarNumeros?: boolean | 'auto';
   /** Paleta. Se mergea sobre `TEMA_DEFAULT`, así podés pisar solo lo que quieras. */
   tema?: Partial<TemaButacas>;
-  /** Texto de la barra superior. `null` la esconde. */
+  /** Texto de la barra de pantalla. `null` la esconde. */
   rotuloPantalla?: string | null;
+  /** Alto máximo del área scrolleable, en px. Default: sin límite. */
+  maxAlto?: number;
   className?: string;
   style?: CSSProperties;
 }
@@ -97,12 +117,16 @@ export interface PropsSeleccion extends PropsVista {
 
 function SeatMapBase({
   filas,
-  ajuste,
-  minSeat = MIN_TACTIL,
+  ajuste = 'ancho',
+  orientacion = 'auto',
+  zoomControls = true,
+  zoomInicial = 1,
+  minSeat,
   maxSeat = MAX_WEB,
   mostrarNumeros = 'auto',
   tema,
   rotuloPantalla = 'Pantalla',
+  maxAlto,
   className,
   style,
   elegidas,
@@ -111,16 +135,24 @@ function SeatMapBase({
   reglas,
 }: PropsSeleccion) {
   const { ref, ancho } = useAnchoContenedor();
+  const [zoom, setZoom] = useState(zoomInicial);
   const interactivo = !!onToggle;
-  // Si vas a TOCAR las butacas, el default es el modo táctil.
-  const modo: AjusteEscala = ajuste ?? (interactivo ? 'tactil' : 'ancho');
 
   const t = useMemo(() => ({ ...TEMA_DEFAULT, ...tema }), [tema]);
 
-  const plano = useMemo(
-    () => calcularPlano(filas, { width: ancho, ajuste: modo, labelWidth: LABEL_W, minSeat, maxSeat }),
-    [filas, ancho, modo, minSeat, maxSeat],
-  );
+  const plano = useMemo(() => {
+    const base = { ajuste, orientacion, labelWidth: LABEL_W, minSeat, maxSeat, zoom };
+    const p0 = calcularPlano(filas, { ...base, width: ancho });
+    if (!p0 || p0.orientacion === 'horizontal') return p0;
+    // En vertical la barra de PANTALLA va al costado y se come ancho. La
+    // orientación puede venir de `'auto'`, así que hay que resolverla primero
+    // para saber cuánto descontar — de ahí el segundo cálculo (es puro y barato).
+    return calcularPlano(filas, {
+      ...base,
+      orientacion: 'vertical',
+      width: Math.max(1, ancho - PANTALLA_W),
+    });
+  }, [filas, ancho, ajuste, orientacion, minSeat, maxSeat, zoom]);
 
   // Índice para devolver la butaca de dominio en el callback: el plano solo
   // carga píxeles a propósito.
@@ -143,32 +175,164 @@ function SeatMapBase({
   };
 
   const conNumeros = mostrarNumeros === 'auto' ? !!plano?.numerosLegibles : !!mostrarNumeros;
+  const vertical = plano?.orientacion === 'vertical';
 
-  const fondo = (b: { estado: EstadoButaca }, elegida: boolean) =>
-    elegida
-      ? t.elegida
-      : b.estado === 'libre'
-        ? t.libre
-        : b.estado === 'vendida'
-          ? t.vendida
-          : t.bloqueada;
+  const fondo = (estado: EstadoButaca, elegida: boolean) =>
+    elegida ? t.elegida : estado === 'libre' ? t.libre : estado === 'vendida' ? t.vendida : t.bloqueada;
 
-  const tinta = (b: { estado: EstadoButaca }, elegida: boolean) =>
+  const tinta = (estado: EstadoButaca, elegida: boolean) =>
     elegida
       ? t.tintaElegida
-      : b.estado === 'libre'
+      : estado === 'libre'
         ? t.tintaLibre
-        : b.estado === 'vendida'
+        : estado === 'vendida'
           ? t.tintaVendida
           : t.tintaBloqueada;
 
+  const butacas =
+    plano &&
+    plano.lineas.flatMap((l) =>
+      l.butacas.map((b) => {
+        const elegida = elegidasSet?.has(b.n) ?? false;
+        const estilo: CSSProperties = {
+          position: 'absolute',
+          left: b.left,
+          top: b.top,
+          width: plano.w,
+          height: plano.h,
+          borderRadius: plano.redondeo,
+          background: fondo(b.estado, elegida),
+          border: b.accesible
+            ? `${Math.max(1, Math.min(plano.w, plano.h) * 0.16)}px solid ${t.accesible}`
+            : 'none',
+          boxSizing: 'border-box',
+          padding: 0,
+          margin: 0,
+          // Centra el número sin romper el posicionamiento absoluto.
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: plano.fuenteNumero,
+          fontVariantNumeric: 'tabular-nums',
+          lineHeight: 1,
+          color: tinta(b.estado, elegida),
+          overflow: 'hidden',
+        };
+
+        // La condición accesible viaja en el texto: el anillo dorado no se lee
+        // con un lector de pantalla.
+        const etiqueta =
+          `Fila ${b.fila}, butaca ${b.numero}` +
+          (b.accesible ? ', accesible' : '') +
+          `, ${elegida ? 'elegida' : b.estado}`;
+
+        const contenido = conNumeros ? b.numero : null;
+
+        if (!interactivo) {
+          return (
+            <div key={b.n} style={estilo} title={etiqueta} aria-label={etiqueta}>
+              {contenido}
+            </div>
+          );
+        }
+
+        return (
+          <button
+            key={b.n}
+            type="button"
+            style={{
+              ...estilo,
+              cursor: b.estado === 'libre' ? 'pointer' : 'not-allowed',
+              // Sin esto, en mobile el navegador se come el primer tap esperando
+              // a ver si es doble-tap para zoom.
+              touchAction: 'manipulation',
+            }}
+            onClick={() => handleClick(b.n)}
+            aria-pressed={elegida}
+            aria-label={etiqueta}
+            title={etiqueta}
+          >
+            {contenido}
+          </button>
+        );
+      }),
+    );
+
+  // El rótulo de fila: a la izquierda de su renglón en horizontal, arriba de su
+  // columna en vertical.
+  const rotulos =
+    plano &&
+    plano.lineas.map((l) => (
+      <div
+        key={`f${l.top}-${l.left}`}
+        style={{
+          position: 'absolute',
+          ...(vertical
+            ? {
+                left: l.left,
+                top: 0,
+                width: plano.w,
+                height: plano.labelWidth - 4,
+                textAlign: 'center',
+                lineHeight: `${plano.labelWidth - 4}px`,
+              }
+            : {
+                left: 0,
+                top: l.top,
+                width: plano.labelWidth - 5,
+                height: plano.h,
+                textAlign: 'right',
+                lineHeight: `${plano.h}px`,
+              }),
+          fontSize: plano.fuenteLetra,
+          fontVariantNumeric: 'tabular-nums',
+          color: t.rotulo,
+        }}
+      >
+        {l.letra}
+      </div>
+    ));
+
+  const caja = plano && (
+    <div style={{ position: 'relative', width: plano.ancho, height: plano.alto }}>
+      {rotulos}
+      {butacas}
+    </div>
+  );
+
+  // El área que scrollea. Con zoom > 1 el plano supera al contenedor en los dos
+  // ejes; `touchAction: 'pan-x pan-y'` deja panear con el dedo sin que el
+  // navegador se quede el gesto.
+  const scroller = (
+    <div
+      style={{
+        overflow: 'auto',
+        overscrollBehavior: 'contain',
+        touchAction: 'pan-x pan-y',
+        maxHeight: maxAlto,
+      }}
+    >
+      {/* Cuando la sala NO llena el contenedor (pasa siempre que muerde el techo
+          de `maxSeat`), el bloque se CENTRA. Si no, queda pegado a la izquierda
+          con un hueco al lado y parece que está roto. */}
+      <div style={plano && plano.ancho < ancho ? { width: plano.ancho, margin: '0 auto' } : undefined}>
+        {caja}
+      </div>
+    </div>
+  );
+
   return (
-    // El ref va SIEMPRE en el contenedor, no dentro del `if (!plano)`: si no,
-    // en el primer render no hay a quién medir y el ancho se queda en 0.
+    // El ref va SIEMPRE en el contenedor, no dentro del `if (!plano)`: si no, en
+    // el primer render no hay a quién medir y el ancho se queda en 0.
     <div ref={ref} className={className} style={{ width: '100%', ...style }}>
-      {rotuloPantalla !== null && (
+      {zoomControls && (
+        <Zoom valor={zoom} onCambio={setZoom} color={t.rotulo} borde={t.pantalla} />
+      )}
+
+      {/* La PANTALLA va del lado al que la sala mira: arriba cuando está
+          horizontal, a la IZQUIERDA cuando está girada. */}
+      {!vertical && rotuloPantalla !== null && (
         <>
-          {/* La pantalla está del lado del Y más chico. */}
           <div style={{ height: 6, borderRadius: 999, margin: '0 8px 10px', background: t.pantalla }} />
           <div
             style={{
@@ -185,132 +349,94 @@ function SeatMapBase({
         </>
       )}
 
-      {plano && (
-        // Gutter fijo + zona de butacas scrolleable. Separarlos es lo que hace
-        // que en un celular no pierdas la fila mientras paneás en horizontal.
-        //
-        // Cuando la sala NO llena el contenedor (pasa siempre que muerde el techo
-        // de `maxSeat`), el bloque se CENTRA. Si no, queda pegado a la izquierda
-        // con un hueco al lado y parece que el componente está roto.
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            ...(plano.desborda
-              ? {}
-              : { width: plano.ancho, marginLeft: 'auto', marginRight: 'auto' }),
-          }}
-        >
-          <div
-            style={{ position: 'relative', flex: '0 0 auto', width: plano.labelWidth, height: plano.alto }}
-          >
-            {plano.lineas.map((l) => (
+      {plano && vertical && (
+        <div style={{ display: 'flex', alignItems: 'stretch' }}>
+          {rotuloPantalla !== null && (
+            <div style={{ flex: `0 0 ${PANTALLA_W}px`, display: 'flex', alignItems: 'center', gap: 4 }}>
               <div
-                key={`f${l.top}`}
+                style={{ width: 6, borderRadius: 999, background: t.pantalla, alignSelf: 'stretch' }}
+              />
+              <div
                 style={{
-                  position: 'absolute',
-                  left: 0,
-                  top: l.top,
-                  width: plano.labelWidth - 5,
-                  height: plano.h,
-                  lineHeight: `${plano.h}px`,
-                  textAlign: 'right',
-                  fontSize: plano.fuenteLetra,
-                  fontVariantNumeric: 'tabular-nums',
+                  writingMode: 'vertical-rl',
+                  transform: 'rotate(180deg)',
+                  textTransform: 'uppercase',
+                  fontSize: 9,
+                  letterSpacing: 2,
                   color: t.rotulo,
+                  whiteSpace: 'nowrap',
                 }}
               >
-                {l.letra}
+                {rotuloPantalla}
               </div>
-            ))}
-          </div>
-
-          <div
-            style={{
-              flex: 1,
-              minWidth: 0,
-              overflowX: plano.desborda ? 'auto' : 'visible',
-              overflowY: 'hidden',
-              overscrollBehaviorX: 'contain',
-            }}
-          >
-            <div
-              style={{
-                position: 'relative',
-                height: plano.alto,
-                width: plano.ancho - plano.labelWidth,
-              }}
-            >
-              {plano.lineas.map((l) =>
-                l.butacas.map((b) => {
-                  const elegida = elegidasSet?.has(b.n) ?? false;
-                  const estilo: CSSProperties = {
-                    position: 'absolute',
-                    // `left` viene con el gutter incluido; acá el gutter es otro nodo.
-                    left: b.left - plano.labelWidth,
-                    top: b.top,
-                    width: plano.w,
-                    height: plano.h,
-                    borderRadius: plano.redondeo,
-                    background: fondo(b, elegida),
-                    border: b.accesible
-                      ? `${Math.max(1, plano.h * 0.16)}px solid ${t.accesible}`
-                      : 'none',
-                    boxSizing: 'border-box',
-                    padding: 0,
-                    margin: 0,
-                    // Centra el número sin romper el posicionamiento absoluto.
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: plano.fuenteNumero,
-                    fontVariantNumeric: 'tabular-nums',
-                    lineHeight: 1,
-                    color: tinta(b, elegida),
-                    overflow: 'hidden',
-                  };
-
-                  // La condición accesible viaja en el texto: el anillo dorado no
-                  // se lee con un lector de pantalla.
-                  const etiqueta =
-                    `Fila ${b.fila}, butaca ${b.numero}` +
-                    (b.accesible ? ', accesible' : '') +
-                    `, ${elegida ? 'elegida' : b.estado}`;
-
-                  const contenido = conNumeros ? b.numero : null;
-
-                  if (!interactivo) {
-                    return (
-                      <div key={b.n} style={estilo} title={etiqueta} aria-label={etiqueta}>
-                        {contenido}
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <button
-                      key={b.n}
-                      type="button"
-                      style={{
-                        ...estilo,
-                        cursor: b.estado === 'libre' ? 'pointer' : 'not-allowed',
-                        // Sin esto, en mobile el navegador se come el primer tap
-                        // esperando a ver si es doble-tap para zoom.
-                        touchAction: 'manipulation',
-                      }}
-                      onClick={() => handleClick(b.n)}
-                      aria-pressed={elegida}
-                      aria-label={etiqueta}
-                      title={etiqueta}
-                    >
-                      {contenido}
-                    </button>
-                  );
-                }),
-              )}
             </div>
-          </div>
+          )}
+          <div style={{ flex: 1, minWidth: 0 }}>{scroller}</div>
         </div>
+      )}
+
+      {plano && !vertical && scroller}
+    </div>
+  );
+}
+
+function Zoom({
+  valor,
+  onCambio,
+  color,
+  borde,
+}: {
+  valor: number;
+  onCambio: (v: number) => void;
+  color: string;
+  borde: string;
+}) {
+  const clamp = (v: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(v.toFixed(2))));
+  const btn: CSSProperties = {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    border: `1px solid ${borde}`,
+    background: 'transparent',
+    color,
+    fontSize: 15,
+    lineHeight: 1,
+    cursor: 'pointer',
+    padding: 0,
+    touchAction: 'manipulation',
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+      <button
+        type="button"
+        style={{ ...btn, opacity: valor <= ZOOM_MIN ? 0.4 : 1 }}
+        onClick={() => onCambio(clamp(valor - ZOOM_PASO))}
+        disabled={valor <= ZOOM_MIN}
+        aria-label="Alejar"
+      >
+        −
+      </button>
+      <button
+        type="button"
+        style={{ ...btn, opacity: valor >= ZOOM_MAX ? 0.4 : 1 }}
+        onClick={() => onCambio(clamp(valor + ZOOM_PASO))}
+        disabled={valor >= ZOOM_MAX}
+        aria-label="Acercar"
+      >
+        +
+      </button>
+      <span style={{ fontSize: 11, color, minWidth: 34, fontVariantNumeric: 'tabular-nums' }}>
+        {Math.round(valor * 100)}%
+      </span>
+      {valor !== 1 && (
+        <button
+          type="button"
+          style={{ ...btn, width: 'auto', padding: '0 8px', fontSize: 11 }}
+          onClick={() => onCambio(1)}
+        >
+          Ver toda
+        </button>
       )}
     </div>
   );
@@ -371,3 +497,4 @@ function Item({ color, label, ring }: { color: string; label: string; ring?: str
 }
 
 export type { PlanoSala };
+export { UMBRAL_ANGOSTO };

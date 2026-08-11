@@ -67,7 +67,9 @@ export interface ButacaPlano {
 
 export interface LineaPlano {
   letra: string;
+  /** Offset del rótulo. En horizontal manda `top`; en vertical, `left`. */
   top: number;
+  left: number;
   butacas: ButacaPlano[];
 }
 
@@ -81,6 +83,20 @@ export interface LineaPlano {
  *   blanco de 10 px no se puede tocar con el dedo.
  */
 export type AjusteEscala = 'ancho' | 'tactil';
+
+/**
+ * Cómo se acuesta la sala sobre la pantalla.
+ *
+ * - `'horizontal'` — como se ve la sala en la realidad: la PANTALLA arriba, las
+ *   filas bajando, las butacas de una fila hacia la derecha.
+ * - `'vertical'`   — la sala girada 90°: la PANTALLA a la IZQUIERDA, cada fila es
+ *   una COLUMNA y las butacas de una fila bajan. Sirve en un celular, donde la
+ *   sala (ancha y baja) no entra a lo ancho pero sí a lo largo — así se scrollea
+ *   en vertical, que es el gesto natural del pulgar, en vez de en horizontal.
+ * - `'auto'`       — vertical solo si el contenedor es más alto que ancho Y la
+ *   sala es más ancha que alta. Es decir: solo cuando de verdad conviene.
+ */
+export type Orientacion = 'horizontal' | 'vertical' | 'auto';
 
 /**
  * El plano completo en píxeles. Es lo único que consume un renderer: no le
@@ -115,6 +131,13 @@ export interface PlanoSala {
    * Solo puede pasar con `ajuste: 'tactil'`. El renderer lo usa para avisar.
    */
   desborda: boolean;
+  /**
+   * Orientación YA RESUELTA (nunca `'auto'`). El renderer la usa para saber
+   * dónde poner el gutter de rótulos y la barra de pantalla: en `'horizontal'`
+   * el rótulo va a la izquierda y la pantalla arriba; en `'vertical'` el rótulo
+   * va arriba (una letra por columna) y la pantalla a la izquierda.
+   */
+  orientacion: 'horizontal' | 'vertical';
 }
 
 export interface OpcionesPlano {
@@ -122,6 +145,14 @@ export interface OpcionesPlano {
   width: number;
   /** Ver `AjusteEscala`. Default `'ancho'`. */
   ajuste?: AjusteEscala;
+  /** Ver `Orientacion`. Default `'horizontal'`. */
+  orientacion?: Orientacion;
+  /**
+   * Alto disponible en px. Solo hace falta para `orientacion: 'auto'` (que
+   * compara la forma del contenedor con la de la sala) y para que en vertical
+   * la escala se ajuste al ALTO en vez de al ancho.
+   */
+  height?: number;
   /** Gutter de la letra de fila. */
   labelWidth?: number;
   /**
@@ -133,6 +164,15 @@ export interface OpcionesPlano {
   maxSeat?: number;
   /** Proporción de la celda que ocupa la butaca; el resto es el aire que separa. */
   llenado?: number;
+  /**
+   * Multiplicador de la escala ya resuelta. `1` = como venga del ajuste.
+   *
+   * Es un multiplicador y NO un tamaño de butaca a propósito: escala los dos
+   * ejes por el mismo factor, así que la proporción de la sala, los pasillos y
+   * la relación butaca/separación quedan intactos. Cambia cuánto ves, nunca la
+   * forma de lo que ves — por eso no puede romper el dibujo.
+   */
+  zoom?: number;
 }
 
 /**

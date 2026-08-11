@@ -192,10 +192,12 @@ export function calcularPlano(
   const {
     width,
     ajuste = 'ancho',
+    orientacion = 'horizontal',
     labelWidth = LABEL_W,
     minSeat = MIN_SEAT,
     maxSeat = MAX_SEAT,
     llenado = LLENADO,
+    zoom = 1,
   } = opciones;
 
   const butacas = filas.flatMap((f) => f.butacas);
@@ -226,9 +228,33 @@ export function calcularPlano(
   //    achicándose: se pisaban entre sí. Derivándolo, el ancho de la butaca es
   //    `llenado` (<1) veces la celda, así que NUNCA puede tapar a la de al lado.
 
-  // +pitchX para que la última butaca entre entera y no se corte contra el borde.
-  const disponible = Math.max(1, width - labelWidth - 2);
-  const escalaAjuste = disponible / (x1 - x0 + pitchX);
+  // ── ORIENTACIÓN ──────────────────────────────────────────────────────────
+  // En vertical la sala se acuesta 90°: la profundidad de filas se mapea al
+  // ANCHO de la pantalla y las butacas de una fila BAJAN. En un celular la sala
+  // (ancha y baja) entra a lo largo y se scrollea con el pulgar, que es el gesto
+  // natural, en vez de en horizontal.
+  const spanX = x1 - x0; // butacas a lo largo de la fila
+  const spanY = y1 - y0; // profundidad de filas
+  const vertical =
+    orientacion === 'vertical' ||
+    // `auto`: solo cuando de verdad conviene — pantalla angosta Y sala más ancha
+    // que profunda. Se mira el ancho y no el alto porque el alto del contenedor
+    // suele depender del propio dibujo (sería circular).
+    (orientacion === 'auto' && width < 560 && spanX > spanY);
+
+  // El gutter de rótulos se come ancho en horizontal y alto en vertical.
+  const gutterEnAncho = vertical ? 0 : labelWidth;
+  const gutterEnAlto = vertical ? labelWidth : 0;
+
+  // Paso de la sala que se mapea a cada eje de la PANTALLA.
+  const pasoEnAncho = vertical ? pitchY : pitchX;
+  const pasoEnAlto = vertical ? pitchX : pitchY;
+  const spanEnAncho = vertical ? spanY : spanX;
+  const spanEnAlto = vertical ? spanX : spanY;
+
+  // +paso para que la última butaca entre entera y no se corte contra el borde.
+  const disponible = Math.max(1, width - gutterEnAncho - 2);
+  const escalaAjuste = disponible / (spanEnAncho + pasoEnAncho);
 
   // Techo: que en una pantalla grande la butaca no se agrande al pedo.
   const escalaTecho = maxSeat / (Math.max(pitchX, pitchY) * llenado);
@@ -240,20 +266,32 @@ export function calcularPlano(
     escala = Math.max(escala, minSeat / (Math.min(pitchX, pitchY) * llenado));
   }
 
+  // ZOOM: multiplica la escala ya resuelta.
+  //
+  // 🔑 Es un MULTIPLICADOR sobre la escala, no un tamaño de butaca. Por eso no
+  // puede romper el dibujo: los dos ejes se escalan por el mismo factor, así que
+  // la proporción de la sala, los pasillos y la relación butaca/separación
+  // quedan intactos. Cambia cuánto ves, nunca la forma de lo que ves.
+  escala *= zoom;
+
   // 🔴 LAS FILAS ESTÁN MÁS JUNTAS QUE LAS BUTACAS. El paso en X es 32 unidades
   //    pero en Y es 23. Dibujar la butaca CUADRADA al ancho del pitch de X la
   //    hace más alta que la separación entre filas ⇒ cada fila se monta sobre la
   //    siguiente y el mapa se ve como una mancha de rayas verticales en vez de
   //    butacas sueltas. Por eso la butaca es RECTANGULAR: ancho del pitch de X,
   //    alto del de Y, misma escala para los dos.
-  const w = pitchX * escala * llenado;
-  const h = pitchY * escala * llenado;
+  const w = pasoEnAncho * escala * llenado;
+  const h = pasoEnAlto * escala * llenado;
 
   const filaDelServidor = new Map<string, string>();
   for (const f of filas) for (const b of f.butacas) filaDelServidor.set(b.n, f.fila);
 
   const lineasPlano: LineaPlano[] = lineas.map((l) => {
-    const top = (l.y - y0) * escala;
+    // La línea (la fila de la sala) es un renglón en horizontal y una COLUMNA en
+    // vertical: por eso su offset cambia de eje.
+    const offsetLinea = (l.y - y0) * escala;
+    const top = vertical ? gutterEnAlto : offsetLinea;
+
     // El ordinal es el ÚLTIMO fallback del número: posición dentro de la línea,
     // de izquierda a derecha. Solo se usa si la etiqueta no trajo número.
     const ordenados = [...l.butacas].sort((a, b) => a.x - b.x);
@@ -261,17 +299,21 @@ export function calcularPlano(
 
     return {
       letra: l.letra,
+      // En vertical el rótulo de la línea se ubica por su LEFT (es una columna);
+      // el renderer lo lee de la primera butaca. `top` queda al ras del gutter.
       top,
+      left: vertical ? offsetLinea : gutterEnAncho,
       butacas: l.butacas.map((b) => {
         const id = resolverIdentidad(b, filaDelServidor.get(b.n) ?? '', ordinal.get(b.n) ?? 1);
+        const offsetButaca = (b.x - x0) * escala;
         return {
           n: b.n,
           fila: id.fila,
           numero: id.numero,
           estado: b.s,
           accesible: b.t === 1,
-          left: labelWidth + (b.x - x0) * escala,
-          top,
+          left: gutterEnAncho + (vertical ? offsetLinea : offsetButaca),
+          top: gutterEnAlto + (vertical ? offsetButaca : offsetLinea),
         };
       }),
     };
@@ -281,19 +323,21 @@ export function calcularPlano(
   // debajo de ~9 px de alto el dígito deja de leerse y solo ensucia el color,
   // que es la señal que de verdad usa el acomodador.
   const fuenteNumero = Math.max(6, Math.min(14, Math.min(h * 0.62, w * 0.55)));
-  const ancho = labelWidth + (x1 - x0) * escala + w;
+  const ancho = gutterEnAncho + spanEnAncho * escala + w;
+  const alto = gutterEnAlto + spanEnAlto * escala + h;
 
   return {
     lineas: lineasPlano,
     w,
     h,
-    alto: (y1 - y0) * escala + h,
+    alto,
     ancho,
     redondeo: Math.max(1.5, Math.min(w, h) * 0.22),
     fuenteLetra: Math.max(7, Math.min(13, h * 0.72)),
     fuenteNumero,
     numerosLegibles: h >= 9 && w >= 11,
     labelWidth,
+    orientacion: vertical ? 'vertical' : 'horizontal',
     // Un píxel de tolerancia: los redondeos de coma flotante no son desborde.
     desborda: ancho > width + 1,
   };

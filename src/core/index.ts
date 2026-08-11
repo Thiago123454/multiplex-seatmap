@@ -15,6 +15,7 @@ export type {
   PlanoSala,
   OpcionesPlano,
   AjusteEscala,
+  Orientacion,
   TemaButacas,
 } from './types';
 export { TEMA_DEFAULT } from './types';
