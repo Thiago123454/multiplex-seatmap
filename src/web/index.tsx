@@ -1,417 +1,978 @@
 /**
  * Renderer WEB del mapa de butacas (React DOM).
  *
- * La geometría no vive acá: vive en `../core`. Este archivo solo pinta lo que el
- * motor ya resolvió a píxeles.
+ * La geometría no vive acá: vive en `../core`. Este archivo es la CAPA DE VISTA.
  *
  * DOS COMPONENTES, una sola implementación:
  *   · <SeatMapView>  → solo vista. No acepta selección ni handlers: no se puede
  *                      volver interactivo por accidente.
  *   · <SeatMap>      → el mismo dibujo + selección.
  *
- * ESTILOS INLINE, no clases de utilidad. El posicionamiento (relative en el
- * contenedor, absolute en butacas y letras) es parte de la CORRECCIÓN del
- * componente, no de su estética: si dependiera de que el host genere clases de
- * Tailwind, alcanzaría con montarlo en un proyecto cuyo Tailwind no escanee este
- * paquete para que las butacas pierdan su contenedor y se apilen contra el
- * viewport. Verificado — pasó de verdad.
+ * ── Las decisiones de esta capa ───────────────────────────────────────────
  *
- * RESPONSIVE — tres piezas que se combinan:
- *   1. la sala SIEMPRE entra a lo ancho (`ajuste: 'ancho'`), así nunca se
- *      deforma la escala para que algo «entre»;
- *   2. la PANTALLA va arriba y las filas bajan — SIEMPRE. Girar la sala 90° para
- *      que entre en un celular existe (`orientacion: 'vertical'`) pero NO es el
- *      default: al girar, la fila A queda a la izquierda y deja de coincidir con
- *      la barra de pantalla, y eso desorienta más de lo que gana;
- *   3. el ZOOM lo maneja quien mira. Es un multiplicador de la escala, así que
- *      no puede romper el dibujo: agranda los dos ejes por igual.
+ * 1. 🔑 **EL ZOOM ES UN `transform`, NO UN RECÁLCULO.** El plano se calcula UNA
+ *    vez por tamaño de contenedor (con `zoom: 1`) y el zoom es `scale()` sobre
+ *    un solo nodo. Es exactamente lo mismo que el multiplicador de escala del
+ *    core —los dos ejes por el mismo factor, así que la proporción de la sala no
+ *    se toca— pero lo compone la GPU: un pinch sobre 292 butacas no reconcilia
+ *    292 nodos de React por frame. `OpcionesPlano.zoom` del core sigue estando
+ *    para quien quiera render sin transform (server, canvas, PDF).
+ *
+ * 2. **100 % = la sala entera.** El piso del zoom es el encuadre que muestra
+ *    toda la sala y el techo es la escala a la que la butaca llega a 46 px, que
+ *    es el tamaño con el que un dedo no falla. Un rango fijo 1-4 sobraba en una
+ *    sala chica y no alcanzaba en una de 292.
+ *
+ * 3. **La PANTALLA vive FUERA del área que se transforma.** Es la referencia
+ *    física de la sala: se acercan y panean las butacas, la pantalla se queda
+ *    quieta, a todo el ancho y arriba de todo.
+ *
+ * 4. **Tap sobre butaca chica = acercar, no elegir.** Por debajo de 22 px, tocar
+ *    acerca esa zona hasta 38 px. Elegir a 8 px no es elegir, es adivinar — y el
+ *    rebote se paga en la caja.
+ *
+ * 5. **El zoom es de mobile.** Debajo de 768 px aparecen los controles y los
+ *    gestos. En desktop la sala entra entera a una escala en la que la butaca ya
+ *    se clickea con el mouse.
+ *
+ * 6. **Un solo tab stop.** Los 292 botones dejaron de ser 292 paradas de
+ *    tabulación: se entra una vez y adentro se navega con flechas (roving
+ *    tabindex), Enter/Espacio para elegir.
+ *
+ * ESTILOS INLINE, no clases de utilidad. El posicionamiento (relative en el
+ * contenedor, absolute en las butacas) es parte de la CORRECCIÓN del componente:
+ * si dependiera de que el host genere clases de Tailwind, alcanzaría con montarlo
+ * en un proyecto cuyo Tailwind no escanee este paquete para que las butacas
+ * pierdan su contenedor y se apilen contra el viewport. Verificado — pasó.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
-import { calcularPlano, puedeElegir, TEMA_DEFAULT } from '../core';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
-  AjusteEscala,
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+} from 'react';
+import { calcularPlano, puedeElegir, dejaButacaSuelta, TEMA_DEFAULT } from '../core';
+import type {
   Butaca,
+  ButacaPlano,
   EstadoButaca,
   FilaButacas,
   MotivoRechazo,
-  Orientacion,
   PlanoSala,
   ReglasSeleccion,
   TemaButacas,
 } from '../core';
 
-const LABEL_W = 20;
-/** Techo del lado de la butaca a zoom 1. En web una de 18 px se ve diminuta. */
-const MAX_WEB = 32;
-/** Por debajo de esto, `orientacion: 'auto'` considera la pantalla «angosta». */
-const UMBRAL_ANGOSTO = 560;
+/** Techo del lado de la butaca en el plano base (antes del zoom). */
+const MAX_SEAT = 32;
+/** Por debajo de este lado en px, un tap ACERCA en vez de elegir. */
+const TAP_MIN = 22;
+/** A cuánto lleva la butaca ese tap de acercamiento. */
+const TAP_OBJ = 38;
+/** Lado con el que un dedo no falla. Define el techo del zoom. */
+const DEDO = 46;
+/** Debajo de esto hay gestos y controles de zoom. */
+const MOVIL = 768;
+/** Cuánto puede pasarse «ver toda la sala» de la escala base cuando sobra lugar. */
+const HOLGURA_FIT = 1.35;
 
-const ZOOM_MIN = 1;
-const ZOOM_MAX = 4;
-const ZOOM_PASO = 0.5;
+/* ── geometría derivada ──────────────────────────────────────────────────── */
 
-/** Mide el contenedor. Es el equivalente web del `onLayout` de RN. */
-function useAnchoContenedor() {
-  const ref = useRef<HTMLDivElement>(null);
-  const [ancho, setAncho] = useState(0);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const ro = new ResizeObserver(([entry]) => setAncho(entry.contentRect.width));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  return { ref, ancho };
+interface Geo {
+  plano: PlanoSala;
+  /** Escala a la que la sala entra entera. Es el 100 % de la UI. */
+  zFit: number;
+  zMax: number;
+  /** Lado menor de la butaca en el plano base. */
+  lado: number;
+  /** Butacas por línea, ordenadas de izquierda a derecha (navegación). */
+  orden: ButacaPlano[][];
+  /** Centro visual de la sala. */
+  ejeX: number;
 }
+
+function derivar(plano: PlanoSala, vw: number, vh: number): Geo {
+  const lado = Math.min(plano.w, plano.h);
+
+  // «Ver toda la sala». Se permite pasar un poco de la escala base (que ya topa
+  // en maxSeat) cuando sobra lugar: en un desktop ancho la sala quedaba flotando
+  // en el medio con la mitad del alto vacío. El tope mantiene el espíritu del
+  // techo del core —que la butaca no crezca al pedo— y sigue siendo un factor
+  // único para los dos ejes.
+  const zFit = Math.min(HOLGURA_FIT, vw / plano.ancho, vh / plano.alto);
+  const zMax = Math.max(zFit * 1.8, DEDO / lado);
+
+  const orden = plano.lineas.map((l) => [...l.butacas].sort((a, b) => a.left - b.left));
+
+  // 🔑 Eje visual de la sala: el centro de la fila MÁS LARGA, no el de la caja.
+  // El anexo accesible cuelga un par de butacas bien a la derecha, y centrar por
+  // la caja corre todo el cuerpo de la sala hacia la izquierda.
+  let larga = plano.lineas[0];
+  for (const l of plano.lineas) if (l.butacas.length > larga.butacas.length) larga = l;
+  const lx = larga.butacas.map((b) => b.left);
+  const ejeX = (Math.min(...lx) + Math.max(...lx) + plano.w) / 2;
+
+  return { plano, zFit, zMax, lado, orden, ejeX };
+}
+
+/* ── props ───────────────────────────────────────────────────────────────── */
 
 export interface PropsVista {
   filas: FilaButacas[];
-  /**
-   * Cómo se elige la escala. Default `'ancho'`: la sala entra completa y no se
-   * deforma nada. `'tactil'` fuerza un lado mínimo y desborda — solo si sabés
-   * que lo querés; para tocar con el dedo es preferible el zoom.
-   */
-  ajuste?: AjusteEscala;
-  /**
-   * Cómo se acuesta la sala. Default `'horizontal'`: la PANTALLA arriba y las
-   * filas bajando, que es como se lee un mapa de butacas.
-   *
-   * `'vertical'` la gira 90° (cada fila una columna) para que una sala ancha
-   * entre en un celular. Tiene un costo que hay que aceptar a conciencia: la
-   * fila A pasa a estar a la IZQUIERDA, no arriba, así que deja de coincidir con
-   * la barra de pantalla. En mobile suele ser mejor no girar nada y usar el
-   * zoom, que no cambia la orientación de nada.
-   */
-  orientacion?: Orientacion;
-  /** Controles de zoom. Default: visibles. */
-  zoomControls?: boolean;
-  /** Zoom inicial. Default 1 (la sala entera). */
-  zoomInicial?: number;
-  /** Lado mínimo de la butaca en `ajuste: 'tactil'`. */
-  minSeat?: number;
-  /** Techo del lado de la butaca a zoom 1. */
-  maxSeat?: number;
-  /**
-   * Número dentro de la butaca. `'auto'` (default) lo prende solo cuando la
-   * butaca da el ancho: a la escala de sala entera el dígito no se lee y solo
-   * ensucia el color, que es la señal que de verdad se usa. Con zoom aparece solo.
-   */
-  mostrarNumeros?: boolean | 'auto';
-  /** Paleta. Se mergea sobre `TEMA_DEFAULT`, así podés pisar solo lo que quieras. */
+  /** Paleta. Se mergea sobre `TEMA_DEFAULT`; para el flujo de venta, `TEMA_OSCURO`. */
   tema?: Partial<TemaButacas>;
-  /** Texto de la barra de pantalla. `null` la esconde. */
+  /** Texto del rótulo de la pantalla. `null` esconde la pantalla entera. */
   rotuloPantalla?: string | null;
-  /** Alto máximo del área scrolleable, en px. Default: sin límite. */
-  maxAlto?: number;
+  /**
+   * Renglón de letras de fila a la izquierda. Apagado por defecto: la butaca ya
+   * lleva su fila en el código (`F12`), así que un gutter repite el dato y roba
+   * ancho — que en un celular es justo lo que falta.
+   */
+  mostrarRotulos?: boolean;
+  /** Leyenda de colores debajo del mapa. */
+  leyenda?: boolean;
+  /** Controles de zoom. Por defecto solo en mobile, que es donde el zoom existe. */
+  zoomControls?: boolean;
+  /** Techo del lado de la butaca en el plano base. */
+  maxSeat?: number;
   className?: string;
   style?: CSSProperties;
 }
 
 export interface PropsSeleccion extends PropsVista {
-  /** Butacas elegidas, por `n`. */
+  /** Butacas elegidas, por `n`. Si no la pasás, el mapa se maneja solo. */
   elegidas?: readonly string[];
-  onToggle?: (butaca: Butaca) => void;
+  /** Recibe la butaca tocada y la lista ya resuelta. */
+  onToggle?: (butaca: Butaca, lista: string[]) => void;
   /** Se llama cuando un click rebota, para que la UI pueda explicar por qué. */
   onRechazo?: (motivo: MotivoRechazo, butaca: Butaca) => void;
   reglas?: ReglasSeleccion;
+  /**
+   * Rechazar la elección que deja una butaca suelta. Prendido por defecto: un
+   * hueco de uno no lo compra nadie.
+   */
+  sinHuecos?: boolean;
 }
+
+const COPY: Record<MotivoRechazo, string> = {
+  vendida: 'Esa butaca ya está vendida',
+  bloqueada: 'Esa butaca está bloqueada',
+  limite: 'Llegaste al máximo de butacas',
+  hueco: 'Así queda una butaca suelta al lado',
+};
+
+/* ── componente ──────────────────────────────────────────────────────────── */
 
 function SeatMapBase({
   filas,
-  ajuste = 'ancho',
-  orientacion = 'horizontal',
-  zoomControls = true,
-  zoomInicial = 1,
-  minSeat,
-  maxSeat = MAX_WEB,
-  mostrarNumeros = 'auto',
   tema,
   rotuloPantalla = 'Pantalla',
-  maxAlto,
+  mostrarRotulos = false,
+  leyenda = false,
+  zoomControls,
+  maxSeat = MAX_SEAT,
   className,
   style,
   elegidas,
   onToggle,
   onRechazo,
   reglas,
+  sinHuecos = true,
 }: PropsSeleccion) {
-  const { ref, ancho } = useAnchoContenedor();
-  const [zoom, setZoom] = useState(zoomInicial);
-  const interactivo = !!onToggle;
+  const raizEl = useRef<HTMLDivElement | null>(null);
+  const vistaEl = useRef<HTMLDivElement | null>(null);
+  const planoEl = useRef<HTMLDivElement | null>(null);
+  const pctEl = useRef<HTMLDivElement | null>(null);
+
+  const [raizAncho, setRaizAncho] = useState(0);
+  const [vp, setVp] = useState({ w: 0, h: 0 });
+  // Qué entra dentro de la butaca. Se decide al ASENTAR el gesto, no por frame.
+  const [texto, setTexto] = useState({ nums: false, codigos: false });
+  const [foco, setFoco] = useState<string | null>(null);
+  const [aviso, setAviso] = useState('');
+  const [propias, setPropias] = useState<string[]>([]);
 
   const t = useMemo(() => ({ ...TEMA_DEFAULT, ...tema }), [tema]);
+  // Interactivo = hay handler (controlado) o no hay lista (se maneja solo).
+  // `<SeatMapView>` pasa `elegidas={[]}` sin handler ⇒ cae en `false`.
+  const esInteractivo = !!onToggle || elegidas === undefined;
+  const movil = raizAncho > 0 && raizAncho < MOVIL;
+  const conZoom = zoomControls ?? movil;
 
-  const plano = useMemo(() => {
-    const base = { ajuste, orientacion, labelWidth: LABEL_W, minSeat, maxSeat, zoom };
-    return calcularPlano(filas, { ...base, width: ancho });
-  }, [filas, ancho, ajuste, orientacion, minSeat, maxSeat, zoom]);
+  const sel = elegidas ?? propias;
+  const selRef = useRef(sel);
+  selRef.current = sel;
 
-  // Índice para devolver la butaca de dominio en el callback: el plano solo
-  // carga píxeles a propósito.
+  const labelWidth = mostrarRotulos ? 20 : 0;
+
+  const plano = useMemo(
+    () =>
+      calcularPlano(filas, {
+        width: vp.w,
+        ajuste: 'ancho',
+        orientacion: 'horizontal',
+        labelWidth,
+        maxSeat,
+      }),
+    [filas, vp.w, labelWidth, maxSeat],
+  );
+
+  const geo = useMemo(
+    () => (plano && vp.w > 0 && vp.h > 0 ? derivar(plano, vp.w, vp.h) : null),
+    [plano, vp.w, vp.h],
+  );
+
   const porId = useMemo(() => {
     const m = new Map<string, Butaca>();
     for (const f of filas) for (const b of f.butacas) m.set(b.n, b);
     return m;
   }, [filas]);
 
-  const elegidasSet = useMemo(() => (elegidas ? new Set(elegidas) : null), [elegidas]);
+  /* ── estado de la vista (mutable: no dispara render) ───────────────────── */
 
-  const handleClick = (n: string) => {
-    const b = porId.get(n);
-    if (!b || !onToggle) return;
-    // Deseleccionar siempre se puede; solo se valida el alta.
-    if (elegidasSet?.has(n)) return onToggle(b);
-    const r = puedeElegir(b, elegidas ?? [], reglas);
-    if (r.ok) onToggle(b);
-    else if (r.motivo) onRechazo?.(r.motivo, b);
+  const v = useRef({ x: 0, y: 0, z: 1 });
+  const geoRef = useRef<Geo | null>(null);
+  const vpRef = useRef(vp);
+  vpRef.current = vp;
+  const movilRef = useRef(movil);
+  movilRef.current = movil;
+
+  const encajar = useCallback(() => {
+    const g = geoRef.current;
+    if (!g) return;
+    const { w: vw, h: vh } = vpRef.current;
+    const W = g.plano.ancho * v.current.z;
+    const H = g.plano.alto * v.current.z;
+    v.current.x =
+      W <= vw
+        ? Math.max(0, Math.min(vw - W, vw / 2 - g.ejeX * v.current.z))
+        : Math.min(0, Math.max(vw - W, v.current.x));
+    // En desktop la sala arranca pegada a la pantalla del cine; en mobile se
+    // centra en el alto libre, que es lo que la deja a la altura del pulgar.
+    v.current.y =
+      H <= vh ? (movilRef.current ? (vh - H) / 2 : 0) : Math.min(0, Math.max(vh - H, v.current.y));
+  }, []);
+
+  const aplicar = useCallback(() => {
+    const g = geoRef.current;
+    if (!g || !planoEl.current) return;
+    const { x, y, z } = v.current;
+    planoEl.current.style.transform = `translate3d(${x}px,${y}px,0) scale(${z})`;
+    if (pctEl.current) pctEl.current.textContent = `${Math.round((z / g.zFit) * 100)}%`;
+  }, []);
+
+  /**
+   * `will-change: transform` promueve el plano a capa propia — y la capa mide lo
+   * que mide el plano ENTERO, con sus 293 butacas. Tenerlo puesto siempre es
+   * memoria de GPU tirada (y varios mapas en la misma página la agotan). Se
+   * prende al empezar el gesto y se apaga al soltar, que es para lo que sirve.
+   */
+  const moviendo = useCallback((si: boolean) => {
+    if (planoEl.current) planoEl.current.style.willChange = si ? 'transform' : 'auto';
+  }, []);
+
+  const tAsentar = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** Al soltar el gesto se decide qué texto entra en la butaca. Debounced: es lo único que re-renderiza. */
+  const asentar = useCallback(() => {
+    clearTimeout(tAsentar.current);
+    tAsentar.current = setTimeout(() => {
+      const g = geoRef.current;
+      if (!g) return;
+      const w = g.plano.w * v.current.z;
+      const h = g.plano.h * v.current.z;
+      setTexto((prev) => {
+        const nums = h >= 9 && w >= 11;
+        const codigos = h >= 10 && w >= 17;
+        return prev.nums === nums && prev.codigos === codigos ? prev : { nums, codigos };
+      });
+    }, 130);
+  }, []);
+
+  const limZ = useCallback((z: number) => {
+    const g = geoRef.current;
+    if (!g) return z;
+    return Math.min(g.zMax, Math.max(g.zFit, z));
+  }, []);
+
+  /** Zoom anclado en un punto del visor: ese punto no se mueve. */
+  const zoomEn = useCallback(
+    (px: number, py: number, z2: number) => {
+      const z = limZ(z2);
+      const k = z / v.current.z;
+      v.current.x = px - (px - v.current.x) * k;
+      v.current.y = py - (py - v.current.y) * k;
+      v.current.z = z;
+      encajar();
+      aplicar();
+      asentar();
+    },
+    [limZ, encajar, aplicar, asentar],
+  );
+
+  // Cuando cambia la geometría (sala nueva o contenedor redimensionado) el
+  // encuadre se rehace: `useLayoutEffect` para que el transform esté puesto
+  // antes de que el browser pinte, si no se ve saltar la sala.
+  useLayoutEffect(() => {
+    geoRef.current = geo;
+    if (!geo) return;
+    v.current = { x: 0, y: 0, z: geo.zFit };
+    encajar();
+    aplicar();
+    asentar();
+  }, [geo, encajar, aplicar, asentar]);
+
+  /* ── medición ──────────────────────────────────────────────────────────── */
+
+  useEffect(() => {
+    const el = raizEl.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setRaizAncho(Math.round(e.contentRect.width)));
+    ro.observe(el);
+    setRaizAncho(Math.round(el.getBoundingClientRect().width));
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const el = vistaEl.current;
+    if (!el) return;
+    const leer = () => {
+      const r = el.getBoundingClientRect();
+      setVp((p) => {
+        const w = Math.round(r.width);
+        const h = Math.round(r.height);
+        return p.w === w && p.h === h ? p : { w, h };
+      });
+    };
+    const ro = new ResizeObserver(leer);
+    ro.observe(el);
+    leer();
+    return () => ro.disconnect();
+  }, []);
+
+  /* ── selección ─────────────────────────────────────────────────────────── */
+
+  const tAviso = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const emitir = useCallback(
+    (b: Butaca, lista: string[]) => {
+      setAviso('');
+      if (onToggle) onToggle(b, lista);
+      if (!elegidas) setPropias(lista);
+    },
+    [onToggle, elegidas],
+  );
+
+  const alternarN = useCallback(
+    (n: string) => {
+      const b = porId.get(n);
+      const g = geoRef.current;
+      if (!b) return;
+      setFoco(n);
+      const actual = selRef.current;
+
+      if (actual.includes(n)) return emitir(b, actual.filter((k) => k !== n));
+
+      const r = puedeElegir(b, actual, reglas);
+      let motivo = r.motivo;
+      let ok = r.ok;
+      if (ok && sinHuecos && g) {
+        // No dejes una butaca suelta. Se compara ANTES contra DESPUÉS: la sala ya
+        // viene con huecos de otras ventas y rechazar por el total dejaría al que
+        // vende sin poder elegir nada.
+        if (dejaButacaSuelta(g.plano.lineas, actual, n, g.plano.w)) {
+          ok = false;
+          motivo = 'hueco';
+        }
+      }
+      if (ok) return emitir(b, [...actual, n]);
+
+      if (motivo) {
+        if (onRechazo) onRechazo(motivo, b);
+        setAviso(COPY[motivo]);
+        clearTimeout(tAviso.current);
+        tAviso.current = setTimeout(() => setAviso(''), 3200);
+      }
+    },
+    [porId, reglas, sinHuecos, emitir, onRechazo],
+  );
+
+  const alternarRef = useRef(alternarN);
+  alternarRef.current = alternarN;
+
+  /* ── gestos ────────────────────────────────────────────────────────────── */
+
+  const tactil = useRef(false);
+  useEffect(() => {
+    tactil.current = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+  }, []);
+
+  useEffect(() => {
+    const el = vistaEl.current;
+    if (!el) return;
+
+    const ptrs = new Map<number, { x: number; y: number }>();
+    let arr: { x: number; y: number; t: number; mov: number; vx: number; vy: number } | null = null;
+    let pin: { d: number; c: { x: number; y: number }; z: number; x: number; y: number } | null = null;
+
+    const local = (cx: number, cy: number) => {
+      const r = el.getBoundingClientRect();
+      return { x: cx - r.left, y: cy - r.top };
+    };
+
+    const tap = (e: PointerEvent) => {
+      const g = geoRef.current;
+      if (!g) return;
+      const destino = (e.target as HTMLElement | null)?.closest?.('[data-n]') as HTMLElement | null;
+      const chico = g.lado * v.current.z < TAP_MIN;
+      const p = local(e.clientX, e.clientY);
+      // Elegir a 8 px no es elegir, es adivinar: primero se acerca.
+      if (chico) return zoomEn(p.x, p.y, TAP_OBJ / g.lado);
+      if (destino?.dataset.n) alternarRef.current(destino.dataset.n);
+    };
+
+    const onDown = (e: PointerEvent) => {
+      if (!movilRef.current) return;
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        /* el navegador puede negarlo; el gesto sigue andando igual */
+      }
+      moviendo(true);
+      if (ptrs.size === 1) {
+        arr = { x: e.clientX, y: e.clientY, t: Date.now(), mov: 0, vx: v.current.x, vy: v.current.y };
+        el.style.cursor = 'grabbing';
+      } else if (ptrs.size === 2) {
+        const [a, b] = [...ptrs.values()];
+        pin = {
+          d: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+          c: local((a.x + b.x) / 2, (a.y + b.y) / 2),
+          z: v.current.z,
+          x: v.current.x,
+          y: v.current.y,
+        };
+        arr = null;
+      }
+    };
+
+    const onMove = (e: PointerEvent) => {
+      if (!ptrs.has(e.pointerId)) return;
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (ptrs.size >= 2 && pin) {
+        const [a, b] = [...ptrs.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+        const c = local((a.x + b.x) / 2, (a.y + b.y) / 2);
+        const z = limZ(pin.z * (d / pin.d));
+        const k = z / pin.z;
+        v.current.x = c.x - (pin.c.x - pin.x) * k;
+        v.current.y = c.y - (pin.c.y - pin.y) * k;
+        v.current.z = z;
+        encajar();
+        aplicar();
+      } else if (arr) {
+        const dx = e.clientX - arr.x;
+        const dy = e.clientY - arr.y;
+        arr.mov = Math.max(arr.mov, Math.hypot(dx, dy));
+        v.current.x = arr.vx + dx;
+        v.current.y = arr.vy + dy;
+        encajar();
+        aplicar();
+      }
+    };
+
+    const onUp = (e: PointerEvent) => {
+      ptrs.delete(e.pointerId);
+      if (ptrs.size < 2) pin = null;
+      if (ptrs.size > 0) return;
+      moviendo(false);
+      el.style.cursor = 'grab';
+      const a = arr;
+      arr = null;
+      // Un arrastre corto y rápido es un tap, no un paneo.
+      if (a && a.mov < 6 && Date.now() - a.t < 450) tap(e);
+      asentar();
+    };
+
+    const onDbl = (e: MouseEvent) => {
+      const g = geoRef.current;
+      if (!g || !movilRef.current) return;
+      const p = local(e.clientX, e.clientY);
+      zoomEn(p.x, p.y, v.current.z > g.zFit * 1.04 ? g.zFit : limZ(DEDO / g.lado));
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      const g = geoRef.current;
+      if (!g || !movilRef.current) return;
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        const p = local(e.clientX, e.clientY);
+        zoomEn(p.x, p.y, v.current.z * Math.exp(-e.deltaY * 0.0028));
+      } else {
+        v.current.x -= e.deltaX;
+        v.current.y -= e.deltaY;
+        encajar();
+        aplicar();
+        asentar();
+      }
+    };
+
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('dblclick', onDbl);
+    return () => {
+      el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('dblclick', onDbl);
+    };
+  }, [limZ, encajar, aplicar, asentar, zoomEn, moviendo]);
+
+  /**
+   * Click de MOUSE. En desktop no hay gestos, así que va directo.
+   *
+   * 🔴 Acá NO va el umbral de `TAP_MIN`. Ese umbral existe porque un DEDO sobre
+   * una butaca de 8 px no elige, adivina — pero un cursor acierta a 19 px sin
+   * problema, y en desktop no hay control de zoom con el que agrandar.
+   * Aplicárselo al mouse deja la sala entera incliqueable en cuanto la butaca
+   * baja de 22 px, que es lo normal en una sala de 293. El guard vive en `tap()`,
+   * que es el camino táctil.
+   */
+  const onClickPlano = (e: ReactMouseEvent) => {
+    if (e.detail === 0) return; // vino del teclado; lo maneja onKeyDown
+    const destino = (e.target as HTMLElement).closest('[data-n]') as HTMLElement | null;
+    if (!destino?.dataset.n) return;
+    if (tactil.current) return; // en táctil ya lo resolvió el gesto
+    alternarRef.current(destino.dataset.n);
   };
 
-  const conNumeros = mostrarNumeros === 'auto' ? !!plano?.numerosLegibles : !!mostrarNumeros;
-  const vertical = plano?.orientacion === 'vertical';
+  /* ── teclado ───────────────────────────────────────────────────────────── */
 
-  const fondo = (estado: EstadoButaca, elegida: boolean) =>
-    elegida ? t.elegida : estado === 'libre' ? t.libre : estado === 'vendida' ? t.vendida : t.bloqueada;
+  const pendienteFoco = useRef(false);
+  useEffect(() => {
+    if (!pendienteFoco.current || !foco) return;
+    pendienteFoco.current = false;
+    const el = planoEl.current?.querySelector<HTMLElement>(`[data-n="${CSS.escape(foco)}"]`);
+    el?.focus({ preventScroll: true });
+  }, [foco]);
 
-  const tinta = (estado: EstadoButaca, elegida: boolean) =>
-    elegida
-      ? t.tintaElegida
-      : estado === 'libre'
-        ? t.tintaLibre
-        : estado === 'vendida'
-          ? t.tintaVendida
-          : t.tintaBloqueada;
+  const aVista = useCallback(
+    (b: ButacaPlano) => {
+      const g = geoRef.current;
+      if (!g) return;
+      const { w: vw, h: vh } = vpRef.current;
+      const z = v.current.z;
+      const m = 24;
+      const l = b.left * z + v.current.x;
+      const tt = b.top * z + v.current.y;
+      const w = g.plano.w * z;
+      const h = g.plano.h * z;
+      if (l < m) v.current.x += m - l;
+      else if (l + w > vw - m) v.current.x -= l + w - (vw - m);
+      if (tt < m) v.current.y += m - tt;
+      else if (tt + h > vh - m) v.current.y -= tt + h - (vh - m);
+      encajar();
+      aplicar();
+    },
+    [encajar, aplicar],
+  );
 
-  const butacas =
-    plano &&
-    plano.lineas.flatMap((l) =>
-      l.butacas.map((b) => {
-        const elegida = elegidasSet?.has(b.n) ?? false;
-        const estilo: CSSProperties = {
-          position: 'absolute',
-          left: b.left,
-          top: b.top,
-          width: plano.w,
-          height: plano.h,
-          borderRadius: plano.redondeo,
-          background: fondo(b.estado, elegida),
-          border: b.accesible
-            ? `${Math.max(1, Math.min(plano.w, plano.h) * 0.16)}px solid ${t.accesible}`
-            : 'none',
-          boxSizing: 'border-box',
-          padding: 0,
-          margin: 0,
-          // Centra el número sin romper el posicionamiento absoluto.
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: plano.fuenteNumero,
-          fontVariantNumeric: 'tabular-nums',
-          lineHeight: 1,
-          color: tinta(b.estado, elegida),
-          overflow: 'hidden',
-        };
+  const verToda = useCallback(() => {
+    const g = geoRef.current;
+    if (!g) return;
+    v.current.z = g.zFit;
+    encajar();
+    aplicar();
+    asentar();
+  }, [encajar, aplicar, asentar]);
 
-        // La condición accesible viaja en el texto: el anillo dorado no se lee
-        // con un lector de pantalla.
-        const etiqueta =
-          `Fila ${b.fila}, butaca ${b.numero}` +
-          (b.accesible ? ', accesible' : '') +
-          `, ${elegida ? 'elegida' : b.estado}`;
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const g = geoRef.current;
+    if (!g) return;
+    const { w: vw, h: vh } = vpRef.current;
 
-        const contenido = conNumeros ? b.numero : null;
+    if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      return zoomEn(vw / 2, vh / 2, v.current.z * 1.4);
+    }
+    if (e.key === '-') {
+      e.preventDefault();
+      return zoomEn(vw / 2, vh / 2, v.current.z / 1.4);
+    }
+    if (e.key === '0') {
+      e.preventDefault();
+      return verToda();
+    }
+    if (!e.key.startsWith('Arrow') && e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
 
-        if (!interactivo) {
-          return (
-            <div key={b.n} style={estilo} title={etiqueta} aria-label={etiqueta}>
-              {contenido}
-            </div>
-          );
+    const orden = g.orden;
+    let li = 0;
+    let bi = 0;
+    if (foco) {
+      for (let i = 0; i < orden.length; i++) {
+        const j = orden[i].findIndex((b) => b.n === foco);
+        if (j >= 0) {
+          li = i;
+          bi = j;
+          break;
+        }
+      }
+    }
+
+    if (e.key === 'Enter' || e.key === ' ') return alternarRef.current(orden[li][bi].n);
+
+    let obj = orden[li][bi];
+    if (e.key === 'ArrowLeft') obj = orden[li][Math.max(0, bi - 1)];
+    else if (e.key === 'ArrowRight') obj = orden[li][Math.min(orden[li].length - 1, bi + 1)];
+    else {
+      // Cambiar de fila: se cae en la butaca más cercana en X, no en el mismo
+      // índice — las filas tienen largos distintos y el índice hace saltar.
+      const li2 = Math.min(orden.length - 1, Math.max(0, li + (e.key === 'ArrowUp' ? -1 : 1)));
+      const ref = obj.left;
+      obj = orden[li2].reduce((a, b) => (Math.abs(b.left - ref) < Math.abs(a.left - ref) ? b : a));
+    }
+    pendienteFoco.current = true;
+    setFoco(obj.n);
+    aVista(obj);
+  };
+
+  /* ── render ────────────────────────────────────────────────────────────── */
+
+  const butacas = useMemo(() => {
+    if (!plano) return [];
+    const elegidasSet = new Set(sel);
+    const anillo = Math.max(0.8, Math.min(plano.w, plano.h) * 0.055);
+    const fuenteCod = Math.min(plano.h * 0.46, plano.w * 0.285);
+    const out: Array<{
+      n: string;
+      elegida: boolean;
+      tab: number;
+      texto: string;
+      etiqueta: string;
+      estilo: CSSProperties;
+      muerta: boolean;
+    }> = [];
+
+    for (const l of plano.lineas) {
+      for (const b of l.butacas) {
+        const eleg = elegidasSet.has(b.n);
+        const muerta = b.estado !== 'libre' && !eleg;
+
+        let contenido = '';
+        let fuente = fuenteCod;
+        if (muerta) {
+          contenido = texto.nums ? '×' : '';
+          fuente = Math.min(plano.h * 0.6, plano.w * 0.6);
+        } else if (b.accesible) {
+          // La accesible se anota con un punto ámbar, no con un glifo: el
+          // pictograma de silla de ruedas es un emoji (sale de color) y a 14 px
+          // no se lee. El `aria-label` sí dice «accesible».
+          contenido = '';
+        } else if (texto.codigos) {
+          contenido = `${b.fila}${b.numero}`;
+        } else if (texto.nums) {
+          contenido = b.numero;
+          fuente = plano.fuenteNumero;
         }
 
-        return (
-          <button
-            key={b.n}
-            type="button"
-            style={{
-              ...estilo,
-              cursor: b.estado === 'libre' ? 'pointer' : 'not-allowed',
-              // Sin esto, en mobile el navegador se come el primer tap esperando
-              // a ver si es doble-tap para zoom.
-              touchAction: 'manipulation',
-            }}
-            onClick={() => handleClick(b.n)}
-            aria-pressed={elegida}
-            aria-label={etiqueta}
-            title={etiqueta}
-          >
-            {contenido}
-          </button>
-        );
-      }),
-    );
+        const fondo = eleg
+          ? t.elegida
+          : b.estado === 'libre'
+            ? t.libre
+            : b.estado === 'vendida'
+              ? t.vendida
+              : t.bloqueada;
 
-  // El rótulo de fila: a la izquierda de su renglón en horizontal, arriba de su
-  // columna en vertical.
-  const rotulos =
-    plano &&
-    plano.lineas.map((l) => (
-      <div
-        key={`f${l.top}-${l.left}`}
-        style={{
-          position: 'absolute',
-          ...(vertical
-            ? {
-                left: l.left,
-                top: 0,
-                width: plano.w,
-                height: plano.labelWidth - 4,
-                textAlign: 'center',
-                lineHeight: `${plano.labelWidth - 4}px`,
-              }
-            : {
-                left: 0,
-                top: l.top,
-                width: plano.labelWidth - 5,
-                height: plano.h,
-                textAlign: 'right',
-                lineHeight: `${plano.h}px`,
-              }),
-          fontSize: plano.fuenteLetra,
-          fontVariantNumeric: 'tabular-nums',
-          color: t.rotulo,
-        }}
-      >
-        {l.letra}
-      </div>
-    ));
+        const tinta = eleg
+          ? t.tintaElegida
+          : b.estado === 'libre'
+            ? t.tintaLibre
+            : b.estado === 'vendida'
+              ? t.tintaVendida
+              : t.tintaBloqueada;
 
-  const caja = plano && (
-    <div style={{ position: 'relative', width: plano.ancho, height: plano.alto }}>
-      {rotulos}
-      {butacas}
-    </div>
-  );
+        out.push({
+          n: b.n,
+          elegida: eleg,
+          muerta,
+          tab: foco === b.n ? 0 : -1,
+          texto: contenido,
+          etiqueta:
+            `Fila ${b.fila}, butaca ${b.numero}` +
+            (b.accesible ? ', accesible' : '') +
+            `, ${eleg ? 'elegida' : b.estado}`,
+          estilo: {
+            position: 'absolute',
+            left: b.left,
+            top: b.top,
+            width: plano.w,
+            height: plano.h,
+            borderRadius: plano.redondeo,
+            background: fondo,
+            border:
+              !eleg && !muerta && t.libreBorde !== 'transparent'
+                ? `${anillo}px solid ${t.libreBorde}`
+                : 'none',
+            boxSizing: 'border-box',
+            padding: 0,
+            margin: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: fuente,
+            fontFamily: 'inherit',
+            fontVariantNumeric: 'tabular-nums',
+            fontWeight: 500,
+            letterSpacing: -0.2,
+            lineHeight: 1,
+            color: tinta,
+            overflow: 'hidden',
+            outline: foco === b.n ? `2px solid ${t.pantallaTinta}` : 'none',
+            outlineOffset: 2,
+            cursor: !esInteractivo ? 'default' : b.estado === 'libre' ? 'pointer' : 'not-allowed',
+            touchAction: 'manipulation',
+            ...(b.accesible && !eleg
+              ? {
+                  backgroundImage: `radial-gradient(circle at 50% 50%, ${t.accesible} 0 29%, transparent 30%)`,
+                }
+              : null),
+          },
+        });
+      }
+    }
+    return out;
+  }, [plano, sel, foco, texto, t, esInteractivo]);
 
-  // El área que scrollea. Con zoom > 1 el plano supera al contenedor en los dos
-  // ejes; `touchAction: 'pan-x pan-y'` deja panear con el dedo sin que el
-  // navegador se quede el gesto.
-  const scroller = (
-    <div
-      style={{
-        overflow: 'auto',
-        overscrollBehavior: 'contain',
-        touchAction: 'pan-x pan-y',
-        maxHeight: maxAlto,
-      }}
-    >
-      {/* Cuando la sala NO llena el contenedor (pasa siempre que muerde el techo
-          de `maxSeat`), el bloque se CENTRA. Si no, queda pegado a la izquierda
-          con un hueco al lado y parece que está roto. */}
-      <div style={plano && plano.ancho < ancho ? { width: plano.ancho, margin: '0 auto' } : undefined}>
-        {caja}
-      </div>
-    </div>
-  );
-
-  return (
-    // El ref va SIEMPRE en el contenedor, no dentro del `if (!plano)`: si no, en
-    // el primer render no hay a quién medir y el ancho se queda en 0.
-    <div ref={ref} className={className} style={{ width: '100%', ...style }}>
-      {zoomControls && (
-        <Zoom valor={zoom} onCambio={setZoom} color={t.rotulo} borde={t.pantalla} />
-      )}
-
-      {/* La PANTALLA va SIEMPRE arriba, en las dos orientaciones: es la
-          convención con la que todo el mundo lee un mapa de butacas y moverla
-          de lugar al girar la sala desorienta más de lo que informa.
-          (Ojo: con la sala girada, el lado que mira a la pantalla es el
-          IZQUIERDO — la fila A queda a la izquierda. La barra de arriba es
-          rótulo de lectura, no la posición física.) */}
-      {rotuloPantalla !== null && (
-        <>
-          <div style={{ height: 6, borderRadius: 999, margin: '0 8px 10px', background: t.pantalla }} />
-          <div
-            style={{
-              textAlign: 'center',
-              marginBottom: 16,
-              textTransform: 'uppercase',
-              fontSize: 9,
-              letterSpacing: 2,
-              color: t.rotulo,
-            }}
-          >
-            {rotuloPantalla}
-          </div>
-        </>
-      )}
-
-      {plano && scroller}
-    </div>
-  );
-}
-
-function Zoom({
-  valor,
-  onCambio,
-  color,
-  borde,
-}: {
-  valor: number;
-  onCambio: (v: number) => void;
-  color: string;
-  borde: string;
-}) {
-  const clamp = (v: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(v.toFixed(2))));
-  const btn: CSSProperties = {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
-    border: `1px solid ${borde}`,
+  const btnCtrl: CSSProperties = {
+    width: 44,
+    height: 40,
+    border: 'none',
+    borderBottom: `1px solid ${t.panelBorde}`,
     background: 'transparent',
-    color,
-    fontSize: 15,
+    color: t.pantallaTinta,
+    fontSize: 19,
     lineHeight: 1,
     cursor: 'pointer',
-    padding: 0,
     touchAction: 'manipulation',
+    padding: 0,
+    fontFamily: 'inherit',
   };
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-      <button
-        type="button"
-        style={{ ...btn, opacity: valor <= ZOOM_MIN ? 0.4 : 1 }}
-        onClick={() => onCambio(clamp(valor - ZOOM_PASO))}
-        disabled={valor <= ZOOM_MIN}
-        aria-label="Alejar"
+    <div
+      ref={raizEl}
+      className={className}
+      style={{
+        position: 'relative',
+        display: 'flex',
+        flexDirection: 'column',
+        width: '100%',
+        height: '100%',
+        minHeight: 0,
+        background: t.fondo,
+        overflow: 'hidden',
+        fontFamily: t.fuente,
+        ...style,
+      }}
+    >
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: 'grid',
+          gridTemplateColumns: '1fr',
+          gridTemplateRows: 'auto 1fr',
+          padding: movil ? '0 10px 8px' : '4px 34px 10px',
+        }}
       >
-        −
-      </button>
-      <button
-        type="button"
-        style={{ ...btn, opacity: valor >= ZOOM_MAX ? 0.4 : 1 }}
-        onClick={() => onCambio(clamp(valor + ZOOM_PASO))}
-        disabled={valor >= ZOOM_MAX}
-        aria-label="Acercar"
-      >
-        +
-      </button>
-      <span style={{ fontSize: 11, color, minWidth: 34, fontVariantNumeric: 'tabular-nums' }}>
-        {Math.round(valor * 100)}%
-      </span>
-      {valor !== 1 && (
-        <button
-          type="button"
-          style={{ ...btn, width: 'auto', padding: '0 8px', fontSize: 11 }}
-          onClick={() => onCambio(1)}
+        {/* 🔑 La PANTALLA vive FUERA del visor que se transforma: es la
+            referencia física de la sala y tiene que quedarse quieta mientras las
+            butacas se acercan y se panean. A todo el ancho y arriba de todo. */}
+        {rotuloPantalla !== null && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'stretch',
+              marginBottom: movil ? 56 : 76,
+            }}
+          >
+            <div
+              style={{
+                height: movil ? 16 : 20,
+                borderRadius: '50% 50% 0 0 / 100% 100% 0 0',
+                background: t.pantalla,
+                boxShadow: t.pantallaHalo,
+                margin: movil ? '0 14px' : '0 6%',
+              }}
+            />
+            <div
+              style={{
+                textAlign: 'center',
+                textTransform: 'uppercase',
+                fontFamily: t.fuenteDisplay,
+                fontWeight: 700,
+                fontSize: movil ? 13 : 14,
+                letterSpacing: movil ? 2.2 : 2.6,
+                color: t.pantallaTinta,
+                marginTop: 6,
+              }}
+            >
+              {rotuloPantalla}
+            </div>
+          </div>
+        )}
+
+        <div
+          ref={vistaEl}
+          tabIndex={0}
+          role="application"
+          aria-label="Mapa de butacas: flechas para moverte, Enter para elegir"
+          onKeyDown={onKeyDown}
+          style={{
+            position: 'relative',
+            overflow: 'hidden',
+            touchAction: movil ? 'none' : 'auto',
+            outline: 'none',
+            cursor: movil ? 'grab' : 'default',
+          }}
         >
-          Ver toda
-        </button>
-      )}
+          <div
+            ref={planoEl}
+            onClick={onClickPlano}
+            style={{ position: 'absolute', left: 0, top: 0, transformOrigin: '0 0' }}
+          >
+            {mostrarRotulos &&
+              plano?.lineas.map((l) => (
+                <div
+                  key={`r${l.top}`}
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    top: l.top,
+                    width: labelWidth - 5,
+                    height: plano.h,
+                    lineHeight: `${plano.h}px`,
+                    textAlign: 'right',
+                    fontSize: plano.fuenteLetra,
+                    color: t.rotulo,
+                  }}
+                >
+                  {l.letra}
+                </div>
+              ))}
+
+            {butacas.map((b) =>
+              esInteractivo ? (
+                <button
+                  key={b.n}
+                  type="button"
+                  data-n={b.n}
+                  tabIndex={b.tab}
+                  aria-pressed={b.elegida}
+                  aria-label={b.etiqueta}
+                  title={b.etiqueta}
+                  style={b.estilo}
+                >
+                  {b.texto}
+                </button>
+              ) : (
+                <div key={b.n} data-n={b.n} aria-label={b.etiqueta} title={b.etiqueta} style={b.estilo}>
+                  {b.texto}
+                </div>
+              ),
+            )}
+          </div>
+
+          {conZoom && (
+            <div
+              style={{
+                position: 'absolute',
+                right: 10,
+                bottom: 10,
+                display: 'flex',
+                flexDirection: 'column',
+                background: t.panel,
+                border: `1px solid ${t.panelBorde}`,
+                borderRadius: 12,
+                overflow: 'hidden',
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => zoomEn(vp.w / 2, vp.h / 2, v.current.z * 1.45)}
+                aria-label="Acercar"
+                style={btnCtrl}
+              >
+                +
+              </button>
+              <div
+                ref={pctEl}
+                style={{
+                  height: 26,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 10.5,
+                  color: t.rotulo,
+                  fontVariantNumeric: 'tabular-nums',
+                  borderBottom: `1px solid ${t.panelBorde}`,
+                }}
+              >
+                100%
+              </div>
+              <button
+                type="button"
+                onClick={() => zoomEn(vp.w / 2, vp.h / 2, v.current.z / 1.45)}
+                aria-label="Alejar"
+                style={btnCtrl}
+              >
+                −
+              </button>
+              <button
+                type="button"
+                onClick={verToda}
+                aria-label="Ver toda la sala"
+                title="Ver toda la sala"
+                style={{ ...btnCtrl, height: 38, borderBottom: 'none', fontSize: 13 }}
+              >
+                ⤢
+              </button>
+            </div>
+          )}
+
+          <div
+            aria-live="polite"
+            style={{
+              position: 'absolute',
+              left: '50%',
+              bottom: 14,
+              transform: 'translateX(-50%)',
+              background: t.elegida,
+              color: t.tintaElegida,
+              fontSize: 12.5,
+              fontWeight: 500,
+              lineHeight: 1,
+              padding: '9px 13px',
+              borderRadius: 999,
+              whiteSpace: 'nowrap',
+              pointerEvents: 'none',
+              opacity: aviso ? 1 : 0,
+              transition: 'opacity .18s ease',
+            }}
+          >
+            {aviso}
+          </div>
+        </div>
+      </div>
+
+      {leyenda && <SeatMapLeyenda tema={tema} />}
     </div>
   );
 }
@@ -422,7 +983,7 @@ function Zoom({
  * que se quiere para reportes, pantallas y el mapa de un acomodador.
  */
 export function SeatMapView(props: PropsVista) {
-  return <SeatMapBase {...props} />;
+  return <SeatMapBase {...props} elegidas={[]} />;
 }
 
 /** Mapa de butacas con selección. Para elegir al vender. */
@@ -430,45 +991,78 @@ export function SeatMap(props: PropsSeleccion) {
   return <SeatMapBase {...props} />;
 }
 
-export function SeatMapLeyenda({
-  bloqueadas = 0,
-  conSeleccion,
-  tema,
-}: {
-  bloqueadas?: number;
-  conSeleccion?: boolean;
-  tema?: Partial<TemaButacas>;
-}) {
+export function SeatMapLeyenda({ tema }: { tema?: Partial<TemaButacas> }) {
   const t = { ...TEMA_DEFAULT, ...tema };
+  const caja: CSSProperties = { width: 13, height: 13, borderRadius: 3, boxSizing: 'border-box' };
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 16 }}>
-      <Item color={t.libre} label="Libre" />
-      {conSeleccion && <Item color={t.elegida} label="Elegida" />}
-      <Item color={t.vendida} label="Vendida" />
-      {/* La bloqueada solo se explica si existe: si no hay ninguna, es ruido. */}
-      {bloqueadas > 0 && <Item color={t.bloqueada} label="Bloqueada" />}
-      <Item color="transparent" label="Accesible" ring={t.accesible} />
+    <div
+      style={{
+        flex: 'none',
+        display: 'flex',
+        flexWrap: 'wrap',
+        justifyContent: 'center',
+        alignItems: 'center',
+        gap: '8px 20px',
+        padding: '14px 16px 16px',
+        fontFamily: t.fuente,
+      }}
+    >
+      <Item
+        t={t}
+        label="Disponible"
+        caja={{
+          ...caja,
+          background: t.libre,
+          border: t.libreBorde !== 'transparent' ? `1px solid ${t.libreBorde}` : undefined,
+        }}
+      />
+      <Item
+        t={t}
+        label="No disponible"
+        caja={{
+          ...caja,
+          background: t.vendida,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 9,
+          color: t.tintaVendida,
+          lineHeight: 1,
+        }}
+        glifo="×"
+      />
+      <Item t={t} label="Seleccionado" caja={{ ...caja, background: t.elegida }} />
+      <Item
+        t={t}
+        label="Accesible en silla de ruedas"
+        caja={{
+          ...caja,
+          background: t.libre,
+          border: t.libreBorde !== 'transparent' ? `1px solid ${t.libreBorde}` : undefined,
+          backgroundImage: `radial-gradient(circle at 50% 50%, ${t.accesible} 0 29%, transparent 30%)`,
+        }}
+      />
     </div>
   );
 }
 
-function Item({ color, label, ring }: { color: string; label: string; ring?: string }) {
+function Item({
+  t,
+  label,
+  caja,
+  glifo,
+}: {
+  t: TemaButacas;
+  label: string;
+  caja: CSSProperties;
+  glifo?: string;
+}) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-      <div
-        style={{
-          width: 11,
-          height: 11,
-          borderRadius: 3,
-          background: color,
-          border: ring ? `2px solid ${ring}` : undefined,
-          boxSizing: 'border-box',
-        }}
-      />
-      <span style={{ fontSize: 11.5, opacity: 0.8 }}>{label}</span>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+      <div style={caja}>{glifo}</div>
+      <span style={{ fontSize: 12, color: t.rotulo }}>{label}</span>
     </div>
   );
 }
 
 export type { PlanoSala };
-export { UMBRAL_ANGOSTO };

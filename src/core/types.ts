@@ -184,25 +184,52 @@ export interface OpcionesPlano {
  * accesible) conviene dejarlos fijos: tienen que significar lo mismo siempre.
  */
 export interface TemaButacas {
+  /** Fondo del mapa. `'transparent'` para heredar el del host. */
+  fondo: string;
+  /**
+   * Relleno de la butaca libre. Puede ser `'transparent'`: en el tema oscuro la
+   * butaca disponible es un ANILLO sin relleno y lo que se ve es `libreBorde`.
+   */
   libre: string;
+  /** Anillo de la butaca libre. `'transparent'` = sin anillo (butaca maciza). */
+  libreBorde: string;
   vendida: string;
   bloqueada: string;
   elegida: string;
-  /** Anillo de la butaca accesible. No reemplaza el estado, lo anota. */
+  /** Marca de la butaca accesible. No reemplaza el estado, lo anota. */
   accesible: string;
   /** Tinta del número, una por fondo: tiene que contrastar contra CADA uno. */
   tintaLibre: string;
   tintaVendida: string;
   tintaBloqueada: string;
   tintaElegida: string;
-  /** Letra de fila del gutter. */
+  /** Letra de fila, cuando el gutter está prendido. */
   rotulo: string;
-  /** Barra que representa la pantalla del cine. */
+  /** Tinta del rótulo «PANTALLA». */
+  pantallaTinta: string;
+  /**
+   * Relleno del arco de la pantalla. Acepta un gradiente CSS: la pantalla se
+   * dibuja como un arco iluminado de abajo hacia arriba.
+   */
   pantalla: string;
+  /** Halo por encima del arco. `'none'` lo apaga. */
+  pantallaHalo: string;
+  /** Fondo del panel flotante de controles de zoom. */
+  panel: string;
+  panelBorde: string;
+  /** Fuente del cuerpo (números de butaca). */
+  fuente: string;
+  /** Fuente de títulos y del rótulo «PANTALLA» — condensada en el diseño. */
+  fuenteDisplay: string;
 }
 
+const SANS = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+
+/** Tema claro: el del ERP y el mapa del acomodador. */
 export const TEMA_DEFAULT: TemaButacas = {
+  fondo: 'transparent',
   libre: '#5BD6A0',
+  libreBorde: 'transparent',
   vendida: '#E5E7EB',
   bloqueada: '#9CA3AF',
   elegida: '#8A2BAE',
@@ -212,5 +239,44 @@ export const TEMA_DEFAULT: TemaButacas = {
   tintaBloqueada: '#FFFFFF',
   tintaElegida: '#FFFFFF',
   rotulo: '#9CA3AF',
+  pantallaTinta: '#9CA3AF',
   pantalla: '#E5E7EB',
+  pantallaHalo: 'none',
+  panel: 'rgba(255,255,255,.94)',
+  panelBorde: '#E5E7EB',
+  fuente: SANS,
+  fuenteDisplay: SANS,
+};
+
+/**
+ * Tema oscuro — el del flujo de venta de entradas.
+ *
+ * 🔑 La butaca DISPONIBLE es un anillo sin relleno y la ELEGIDA es maciza roja:
+ * lo que se llena de color es lo que ya es tuyo. La vendida es un bloque gris
+ * apagado con una cruz, para que el ojo la descarte sin tener que leerla.
+ *
+ * La fuente es Barlow (Condensed para el display) y la carga el HOST: un paquete
+ * no debería inyectar `<link>` a Google Fonts. Si no está, cae al stack del
+ * sistema sin romper el layout.
+ */
+export const TEMA_OSCURO: TemaButacas = {
+  fondo: '#0C0C0D',
+  libre: 'transparent',
+  libreBorde: 'rgba(255,255,255,.58)',
+  vendida: '#39393C',
+  bloqueada: '#2A2A2C',
+  elegida: '#E03A2F',
+  accesible: '#F9C000',
+  tintaLibre: '#FFFFFF',
+  tintaVendida: '#8A8A8F',
+  tintaBloqueada: '#6E6E73',
+  tintaElegida: '#FFFFFF',
+  rotulo: '#8A8A8F',
+  pantallaTinta: '#FFFFFF',
+  pantalla: 'linear-gradient(0deg,#141416 0%,#4A4A4E 55%,#B9B9BE 100%)',
+  pantallaHalo: '0 -12px 30px rgba(255,255,255,.10)',
+  panel: 'rgba(20,20,22,.95)',
+  panelBorde: '#2A2A2D',
+  fuente: `'Barlow', ${SANS}`,
+  fuenteDisplay: `'Barlow Condensed', ${SANS}`,
 };

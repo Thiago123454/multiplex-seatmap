@@ -76,20 +76,26 @@ Y en `tsconfig.json`, `paths` apuntando a `../multiplex-seatmap/src/*`.
 
 ```tsx
 import { SeatMap, SeatMapView, SeatMapLeyenda } from '@multiplex/seatmap/web'
+import { TEMA_OSCURO } from '@multiplex/seatmap'
 // import { SeatMap, SeatMapView } from '@multiplex/seatmap/native'
 
 // Solo vista: no acepta selección ni handlers.
 <SeatMapView filas={filas} />
 
-// Con selección.
+// Con selección. `onToggle` recibe la butaca y la lista YA resuelta.
 <SeatMap
   filas={filas}
+  tema={TEMA_OSCURO}
+  leyenda
   elegidas={elegidas}
-  onToggle={(butaca) => toggle(butaca.n)}
-  onRechazo={(motivo) => avisar(motivo)}   // 'vendida' | 'bloqueada' | 'limite'
+  onToggle={(butaca, lista) => setElegidas(lista)}
+  onRechazo={(motivo) => avisar(motivo)}   // 'vendida' | 'bloqueada' | 'limite' | 'hueco'
   reglas={{ max: 8 }}
 />
 ```
+
+Sin `elegidas` el mapa **se maneja solo** (selección interna); con `elegidas` +
+`onToggle` es controlado, como cualquier input de React.
 
 **Son dos componentes a propósito.** `SeatMapView` no tiene forma de volverse interactivo: si
 lo que querés es mostrar ocupación, no podés cablear un handler sin querer.
@@ -112,30 +118,68 @@ type Butaca = {
 
 ---
 
-## Responsive
+## Responsive, zoom y gestos
 
-La decisión responsive es una sola, `ajuste`:
+La sala **siempre entra completa** a la escala base (`ajuste: 'ancho'`): nunca se
+deforma nada para que algo «entre». Encima de eso va el zoom.
 
-| | `'ancho'` | `'tactil'` |
-|---|---|---|
-| Qué garantiza | la sala **entra completa**, sin scroll | la butaca **nunca baja de `minSeat`** (default 28 px) |
-| A cambio | en un celular la butaca puede quedar en 10 px | si no entra, **scrollea en horizontal** |
-| Para | **mirar** ocupación | **elegir** butacas |
-| Default en | `<SeatMapView>` | `<SeatMap>` |
+🔑 **El zoom es un `transform`, no un recálculo.** El plano se calcula UNA vez por
+tamaño de contenedor (con `zoom: 1`) y el zoom/paneo es un `translate3d(...) scale()`
+aplicado **imperativamente** sobre un solo nodo. Es exactamente lo mismo que el
+multiplicador de escala del núcleo —los dos ejes por el mismo factor, así que la
+proporción de la sala y los pasillos no se tocan— pero lo compone la GPU: un pinch
+sobre 293 butacas no reconcilia 293 nodos de React por frame. React no participa
+del gesto. `OpcionesPlano.zoom` sigue estando para render sin transform (server,
+canvas, PDF).
 
-Cuando scrollea, **el gutter de las letras de fila queda fijo** y solo se mueve la zona de
-butacas: en un celular no perdés la referencia de fila mientras paneás.
+| | |
+|---|---|
+| **100 %** | la sala entera (`zFit`) |
+| **Techo** | la escala a la que la butaca llega a 46 px — el tamaño con el que un dedo no falla |
+| **Gestos** | pinch, pan a un dedo, doble tap, ⌘/Ctrl + rueda para zoom, rueda para pan |
+| **Dónde** | solo debajo de **768 px del ancho del PROPIO componente** (no del viewport) |
 
-🔴 **El tamaño de la butaca se DERIVA de la escala, nunca se clampea aparte.** Clampearlo por
-separado es lo que hace que en un contenedor angosto la butaca crezca hasta un mínimo mientras
-la separación sigue achicándose — y se pisan entre sí. Derivándolo, el ancho de la butaca es
-`llenado` (< 1) veces la celda, así que no puede tapar a la de al lado. Hay tests que lo fijan
-a 180, 240, 320, 420 y 768 px.
+⚠️ **El componente se mide a sí mismo.** Si lo metés en una columna de 700 px
+dentro de un desktop de 1400, se pone en modo mobile — con gestos y control de
+zoom. Es lo correcto (se adapta a su caja), pero sorprende: si querés el modo
+desktop, dale ancho o forzá `zoomControls={false}`.
 
-El **número de butaca se apaga solo** por debajo de 11×9 px (`mostrarNumeros: 'auto'`): a esa
-escala el dígito no se lee y solo ensucia el color, que es la señal que de verdad se usa.
+**Tap sobre butaca chica = acercar, no elegir.** Con el dedo, por debajo de 22 px
+un tap acerca esa zona hasta 38 px en vez de seleccionar: elegir a 8 px no es
+elegir, es adivinar. 🔴 **Ese umbral NO se le aplica al mouse**: el cursor acierta
+a 19 px y en desktop no hay control de zoom con el que agrandar — aplicárselo deja
+la sala entera incliqueable en cuanto la butaca baja de 22 px, que es lo normal en
+una sala de 293.
 
----
+**La PANTALLA vive FUERA del área que se transforma.** Es la referencia física de
+la sala: se acercan y panean las butacas, la pantalla se queda quieta, a todo el
+ancho y arriba de todo. Se dibuja como un arco iluminado (`pantalla` acepta un
+gradiente).
+
+**Teclado: un solo tab stop.** Las 293 butacas no son 293 paradas de tabulación —
+se entra una vez al mapa y adentro se navega con flechas (roving tabindex),
+Enter/Espacio elige, `+`/`-`/`0` manejan el zoom. Al cambiar de fila se cae en la
+butaca más cercana en X, no en el mismo índice: las filas tienen largos distintos.
+
+**El número se apaga solo** cuando la butaca queda chica, y la decisión se toma al
+**asentar** el gesto (130 ms de debounce), no por frame: a `≥ 17 px` de ancho entra
+el código completo (`F12`), a `≥ 11 px` solo el número, y por debajo nada.
+
+## No dejar una butaca suelta
+
+`contarHuecos` cuenta las butacas libres que quedan **aisladas**: un solo lugar
+vacío rodeado de ocupado/elegido o contra el borde de su bloque. Un hueco de uno
+no lo compra nadie.
+
+🔑 **Se usa comparando ANTES contra DESPUÉS y solo se rechaza si el número SUBE.**
+La sala ya viene con huecos de otras ventas; rechazar por el total dejaría al que
+vende sin poder elegir nada en una sala medio llena. `dejaButacaSuelta()` envuelve
+esa comparación, que es la única forma correcta de usarlo.
+
+Trabaja sobre las líneas ya resueltas a píxeles y no sobre las butacas crudas,
+porque es ahí donde el **pasillo** se ve: dos butacas separadas por más de 1,7
+anchos no son vecinas, así que la última butaca antes del pasillo no cuenta como
+suelta. Se apaga con `sinHuecos={false}`.
 
 ## Tema
 
@@ -146,10 +190,22 @@ sobre `TEMA_DEFAULT`.
 <SeatMap filas={filas} tema={{ elegida: 'var(--brand)', vendida: 'var(--rule)' }} />
 ```
 
-Recomendación: atá los **neutros** (`vendida`, `bloqueada`, `rotulo`, `pantalla`) al tema del
-host para que sigan light/dark solos, y dejá **fijos** los semánticos (`libre`, `elegida`,
-`accesible`) — tienen que significar lo mismo en los dos temas. Ojo con reusar un `--brand`
-rojo para «elegida»: sobre una butaca se lee como «ocupada».
+Vienen dos temas armados: **`TEMA_DEFAULT`** (claro, el del ERP y el mapa del
+acomodador) y **`TEMA_OSCURO`** (el del flujo de venta de entradas).
+
+En el oscuro la butaca **disponible es un anillo sin relleno** (`libre:
+'transparent'` + `libreBorde`) y la **elegida es maciza roja**: lo que se llena de
+color es lo que ya es tuyo. Por eso el tema tiene `libre` y `libreBorde` separados.
+
+La fuente va por tema (`fuente` / `fuenteDisplay`) y **la carga el host**: un
+paquete no debería inyectar `<link>` a Google Fonts. El diseño usa Barlow y Barlow
+Condensed; sin ellas cae al stack del sistema sin romper el layout.
+
+Recomendación general: atá los **neutros** (`vendida`, `bloqueada`, `rotulo`,
+`pantalla`, `panel`) al tema del host para que sigan light/dark solos, y dejá
+**fijos** los semánticos (`libre`, `elegida`, `accesible`) — tienen que significar
+lo mismo en los dos temas. Ojo con reusar un `--brand` rojo para «elegida» en una
+app cuyo brand es rojo de peligro: sobre una butaca se lee como «ocupada».
 
 Cada fondo tiene su tinta (`tintaLibre`, `tintaVendida`, …) porque el número tiene que
 contrastar contra **cada** estado, no contra uno.

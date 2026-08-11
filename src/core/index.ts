@@ -18,7 +18,7 @@ export type {
   Orientacion,
   TemaButacas,
 } from './types';
-export { TEMA_DEFAULT } from './types';
+export { TEMA_DEFAULT, TEMA_OSCURO } from './types';
 
 export {
   calcularPlano,
@@ -33,5 +33,11 @@ export {
 export { parseEtiqueta, formatearEtiqueta } from './etiqueta';
 export type { Etiqueta } from './etiqueta';
 
-export { puedeElegir, alternar, depurarSeleccion } from './selection';
+export {
+  puedeElegir,
+  alternar,
+  depurarSeleccion,
+  contarHuecos,
+  dejaButacaSuelta,
+} from './selection';
 export type { ReglasSeleccion, MotivoRechazo, ResultadoElegir } from './selection';
