@@ -111,13 +111,36 @@ export function depurarSeleccion(
 const VECINAS = 1.7;
 
 /**
+ * Eje A LO LARGO de la línea.
+ *
+ * 🔴 No siempre es `left`. Con `orientacion: 'vertical'` la línea es una COLUMNA:
+ * todas sus butacas comparten `left` y varían en `top`. Mirar `left` ahí deja
+ * todas las diferencias en 0, con lo que el corte del pasillo nunca se dispara y
+ * el recorrido queda en el orden crudo del array. Se elige el eje que de verdad
+ * varía.
+ */
+function ejeDeLinea(l: LineaPlano): 'left' | 'top' {
+  let lMin = Infinity;
+  let lMax = -Infinity;
+  let tMin = Infinity;
+  let tMax = -Infinity;
+  for (const b of l.butacas) {
+    if (b.left < lMin) lMin = b.left;
+    if (b.left > lMax) lMax = b.left;
+    if (b.top < tMin) tMin = b.top;
+    if (b.top > tMax) tMax = b.top;
+  }
+  return lMax - lMin >= tMax - tMin ? 'left' : 'top';
+}
+
+/**
  * Cuenta las butacas libres que quedan SUELTAS: un solo lugar vacío rodeado de
  * ocupado/elegido, o contra el borde de su bloque. Un hueco de uno no lo compra
  * nadie, así que es plata que la sala pierde.
  *
- * 🔑 **Se usa comparando ANTES contra DESPUÉS, y solo se rechaza si SUBE.** La
+ * 🔑 **No se usa por su valor absoluto sino comparando ANTES contra DESPUÉS.** La
  * sala ya viene con huecos de otras ventas; rechazar por el total dejaría al que
- * vende sin poder elegir nada en una sala medio llena.
+ * vende sin poder elegir nada en una sala medio llena. Ver `dejaButacaSuelta`.
  *
  * Trabaja sobre las líneas YA resueltas a píxeles y no sobre las butacas crudas,
  * porque es ahí donde el PASILLO se ve: dos butacas separadas por más de
@@ -133,12 +156,14 @@ export function contarHuecos(
   let huecos = 0;
 
   for (const l of lineas) {
-    const bs = [...l.butacas].sort((a, b) => a.left - b.left);
+    if (l.butacas.length === 0) continue;
+    const eje = ejeDeLinea(l);
+    const bs = [...l.butacas].sort((a, b) => a[eje] - b[eje]);
     let run = 0;
     for (let i = 0; i < bs.length; i++) {
       const b = bs[i];
       const libre = b.estado === 'libre' && !sel.has(b.n);
-      const corte = i + 1 >= bs.length || bs[i + 1].left - b.left > anchoButaca * VECINAS;
+      const corte = i + 1 >= bs.length || bs[i + 1][eje] - b[eje] > anchoButaca * VECINAS;
       if (libre) run++;
       if (!libre || corte) {
         if (run === 1) huecos++;
@@ -151,10 +176,20 @@ export function contarHuecos(
 }
 
 /**
- * ¿Elegir `butaca` deja alguna butaca suelta que antes no lo estaba?
+ * ¿Elegir `butaca` deja una butaca suelta que la compra ya no pueda absorber?
  *
- * Envuelve `contarHuecos` en la comparación antes/después, que es la única forma
- * correcta de usarlo. Devuelve `true` si hay que rechazar.
+ * 🔴 **No alcanza con mirar un paso.** Elegir de a una siempre pasa por un estado
+ * intermedio con un hueco: en un bloque de dos libres, tomar la primera deja a la
+ * segunda sola. Si se rechaza ahí, **las dos últimas libres de cualquier bloque
+ * quedan invendibles para siempre** — exactamente lo contrario de lo que la regla
+ * busca. Medido: un bloque de 6 libres se trababa en 4.
+ *
+ * Por eso se mira UN PASO ADELANTE: si el propio comprador puede tapar con otra
+ * butaca el hueco que acaba de abrir, el hueco es transitorio y se deja pasar.
+ * Solo se rechaza el hueco que ya no tiene forma de cerrarse.
+ *
+ * Los candidatos se buscan únicamente en las líneas que tocó el cambio: elegir
+ * una butaca solo puede alterar los runs de SU línea.
  */
 export function dejaButacaSuelta(
   lineas: readonly LineaPlano[],
@@ -163,6 +198,16 @@ export function dejaButacaSuelta(
   anchoButaca: number,
 ): boolean {
   const antes = contarHuecos(lineas, elegidas, anchoButaca);
-  const despues = contarHuecos(lineas, [...elegidas, n], anchoButaca);
-  return despues > antes;
+  const conN = [...elegidas, n];
+  if (contarHuecos(lineas, conN, anchoButaca) <= antes) return false;
+
+  const suLinea = lineas.find((l) => l.butacas.some((b) => b.n === n));
+  if (!suLinea) return true;
+
+  const yaSel = new Set(conN);
+  for (const b of suLinea.butacas) {
+    if (b.estado !== 'libre' || yaSel.has(b.n)) continue;
+    if (contarHuecos(lineas, [...conN, b.n], anchoButaca) <= antes) return false;
+  }
+  return true;
 }

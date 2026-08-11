@@ -52,7 +52,7 @@ import type {
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
 } from 'react';
-import { calcularPlano, puedeElegir, dejaButacaSuelta, TEMA_DEFAULT } from '../core';
+import { calcularPlano, puedeElegir, dejaButacaSuelta, contarHuecos, TEMA_DEFAULT } from '../core';
 import type {
   Butaca,
   ButacaPlano,
@@ -190,7 +190,9 @@ function SeatMapBase({
   // Qué entra dentro de la butaca. Se decide al ASENTAR el gesto, no por frame.
   const [texto, setTexto] = useState({ nums: false, codigos: false });
   const [foco, setFoco] = useState<string | null>(null);
-  const [aviso, setAviso] = useState('');
+  // El nonce existe para la live region: `setAviso` con el MISMO string hace
+  // bailout y el lector de pantalla no vuelve a anunciar el segundo rechazo.
+  const [aviso, setAviso] = useState({ txt: '', n: 0 });
   const [propias, setPropias] = useState<string[]>([]);
 
   const t = useMemo(() => ({ ...TEMA_DEFAULT, ...tema }), [tema]);
@@ -313,14 +315,32 @@ function SeatMapBase({
   // Cuando cambia la geometría (sala nueva o contenedor redimensionado) el
   // encuadre se rehace: `useLayoutEffect` para que el transform esté puesto
   // antes de que el browser pinte, si no se ve saltar la sala.
+  // 🔴 El reset se gatea por la FIRMA de la geometría, NO por la identidad de
+  // `geo`. `plano` depende de la identidad de `filas`, y el host arma ese array
+  // de nuevo en cada refresh de butacas vendidas (polling / realtime): resetear
+  // por identidad le tiraba el zoom y el paneo al que estaba comprando, en medio
+  // de la compra, cada vez que llegaba un refresco.
+  const firma = geo
+    ? `${vp.w}x${vp.h}|${geo.plano.ancho}x${geo.plano.alto}|${geo.plano.w}|${geo.zFit}`
+    : '';
+  const firmaRef = useRef<string | null>(null);
+  const rebasarGesto = useRef<(() => void) | null>(null);
+
   useLayoutEffect(() => {
     geoRef.current = geo;
     if (!geo) return;
-    v.current = { x: 0, y: 0, z: geo.zFit };
+    if (firmaRef.current !== firma) {
+      firmaRef.current = firma;
+      v.current = { x: 0, y: 0, z: geo.zFit };
+    }
     encajar();
     aplicar();
+    // Si el contenedor cambió de tamaño con el dedo apoyado, las fotos del gesto
+    // quedaron tomadas contra el rect viejo: hay que rebasarlas o el próximo
+    // frame pega un salto.
+    rebasarGesto.current?.();
     asentar();
-  }, [geo, encajar, aplicar, asentar]);
+  }, [geo, firma, encajar, aplicar, asentar]);
 
   /* ── medición ──────────────────────────────────────────────────────────── */
 
@@ -356,7 +376,7 @@ function SeatMapBase({
 
   const emitir = useCallback(
     (b: Butaca, lista: string[]) => {
-      setAviso('');
+      setAviso((p) => (p.txt ? { txt: '', n: p.n } : p));
       if (onToggle) onToggle(b, lista);
       if (!elegidas) setPropias(lista);
     },
@@ -365,13 +385,36 @@ function SeatMapBase({
 
   const alternarN = useCallback(
     (n: string) => {
+      // Decisión 8: `<SeatMapView>` no elige NI avisa. Sin este guard, un click
+      // sobre una butaca vendida en modo vista mostraba la píldora de rechazo.
+      if (!esInteractivo) return;
       const b = porId.get(n);
       const g = geoRef.current;
       if (!b) return;
       setFoco(n);
       const actual = selRef.current;
 
-      if (actual.includes(n)) return emitir(b, actual.filter((k) => k !== n));
+      if (actual.includes(n)) {
+        // Sacar una butaca también puede dejar un hueco de uno. Acá se AVISA
+        // pero no se bloquea: impedir el deselect deja al comprador atrapado en
+        // una selección que no quiere, que es peor que el hueco.
+        const resto = actual.filter((k) => k !== n);
+        emitir(b, resto); // primero: `emitir` limpia el aviso
+        if (
+          sinHuecos &&
+          g &&
+          contarHuecos(g.plano.lineas, resto, g.plano.w) >
+            contarHuecos(g.plano.lineas, actual, g.plano.w)
+        ) {
+          setAviso((prev) => ({ txt: COPY.hueco, n: prev.n + 1 }));
+          clearTimeout(tAviso.current);
+          tAviso.current = setTimeout(
+            () => setAviso((prev) => (prev.txt ? { txt: '', n: prev.n } : prev)),
+            3200,
+          );
+        }
+        return;
+      }
 
       const r = puedeElegir(b, actual, reglas);
       let motivo = r.motivo;
@@ -389,12 +432,12 @@ function SeatMapBase({
 
       if (motivo) {
         if (onRechazo) onRechazo(motivo, b);
-        setAviso(COPY[motivo]);
+        setAviso((p) => ({ txt: COPY[motivo], n: p.n + 1 }));
         clearTimeout(tAviso.current);
-        tAviso.current = setTimeout(() => setAviso(''), 3200);
+        tAviso.current = setTimeout(() => setAviso((p) => (p.txt ? { txt: '', n: p.n } : p)), 3200);
       }
     },
-    [porId, reglas, sinHuecos, emitir, onRechazo],
+    [esInteractivo, porId, reglas, sinHuecos, emitir, onRechazo],
   );
 
   const alternarRef = useRef(alternarN);
@@ -402,56 +445,117 @@ function SeatMapBase({
 
   /* ── gestos ────────────────────────────────────────────────────────────── */
 
-  const tactil = useRef(false);
-  useEffect(() => {
-    tactil.current = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
-  }, []);
+  /**
+   * El camino de gestos AVISA que ya resolvió el toque.
+   *
+   * Antes esto se infería de `matchMedia('(pointer: coarse)')` y rompía en los
+   * dos extremos:
+   *   · pantalla táctil de >=768 px (monitor de boletería, iPad landscape): el
+   *     camino de gestos está apagado por ANCHO y el de click por TIPO DE
+   *     PUNTERO, así que no quedaba NINGUNA forma de elegir;
+   *   · mouse en un contenedor angosto (<768 px): resolvían los DOS, así que la
+   *     butaca se elegía y se des-elegía en el mismo click.
+   * Dos compuertas distintas para una sola decisión. Ahora hay un solo flag, y
+   * lo pone quien realmente consumió el evento.
+   */
+  const gestoResolvio = useRef(false);
 
   useEffect(() => {
     const el = vistaEl.current;
     if (!el) return;
 
     const ptrs = new Map<number, { x: number; y: number }>();
-    let arr: { x: number; y: number; t: number; mov: number; vx: number; vy: number } | null = null;
+    type Arrastre = {
+      x: number;
+      y: number;
+      mov: number;
+      vx: number;
+      vy: number;
+      dest: HTMLElement | null;
+    };
+    let arr: Arrastre | null = null;
     let pin: { d: number; c: { x: number; y: number }; z: number; x: number; y: number } | null = null;
+    /** ts del último tap que ACERCÓ: el doble tap no puede deshacerlo. */
+    let acerco = 0;
 
     const local = (cx: number, cy: number) => {
       const r = el.getBoundingClientRect();
       return { x: cx - r.left, y: cy - r.top };
     };
 
-    const tap = (e: PointerEvent) => {
+    /** Foto del pinch con el par de punteros ACTUAL y el encuadre actual. */
+    const rebasePin = () => {
+      const [a, b] = [...ptrs.values()];
+      if (!a || !b) return;
+      pin = {
+        d: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+        c: local((a.x + b.x) / 2, (a.y + b.y) / 2),
+        z: v.current.z,
+        x: v.current.x,
+        y: v.current.y,
+      };
+    };
+
+    /**
+     * El destino viene del POINTERDOWN, no del `e.target` del pointerup.
+     *
+     * `setPointerCapture` retargetea todos los eventos de ese pointerId al
+     * elemento capturador (el visor), así que en el pointerup `e.target` ya no
+     * es la butaca y `closest('[data-n]')` daba null SIEMPRE: en táctil no se
+     * podía elegir NINGUNA butaca una vez pasado el umbral de 22 px.
+     */
+    const tap = (e: PointerEvent, destino: HTMLElement | null) => {
       const g = geoRef.current;
       if (!g) return;
-      const destino = (e.target as HTMLElement | null)?.closest?.('[data-n]') as HTMLElement | null;
-      const chico = g.lado * v.current.z < TAP_MIN;
+      // Un tap en el vacío (pasillo, margen, control) no hace nada. Sin esto,
+      // tocar el botón «+» caía en la rama de acercar con las coordenadas del
+      // botón y pegaba un salto de encuadre.
+      if (!destino?.dataset.n) return;
+      gestoResolvio.current = true;
       const p = local(e.clientX, e.clientY);
       // Elegir a 8 px no es elegir, es adivinar: primero se acerca.
-      if (chico) return zoomEn(p.x, p.y, TAP_OBJ / g.lado);
-      if (destino?.dataset.n) alternarRef.current(destino.dataset.n);
+      if (g.lado * v.current.z < TAP_MIN) {
+        acerco = Date.now();
+        return zoomEn(p.x, p.y, TAP_OBJ / g.lado);
+      }
+      alternarRef.current(destino.dataset.n);
+    };
+
+    rebasarGesto.current = () => {
+      if (pin && ptrs.size >= 2) rebasePin();
+      else if (arr && ptrs.size === 1) {
+        const [q] = [...ptrs.values()];
+        if (q) arr = { ...arr, x: q.x, y: q.y, vx: v.current.x, vy: v.current.y };
+      }
     };
 
     const onDown = (e: PointerEvent) => {
+      // Se limpia SIEMPRE, antes del guard de `movil`: si el camino de gestos no
+      // corre, el click que viene después tiene que poder elegir.
+      gestoResolvio.current = false;
       if (!movilRef.current) return;
+      // Los controles de zoom viven dentro del visor pero NO son el visor: el
+      // gesto que nace ahí no es un paneo ni un tap sobre la sala.
+      if ((e.target as HTMLElement | null)?.closest?.('[data-ctrl]')) return;
+
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
       try {
         el.setPointerCapture(e.pointerId);
       } catch {
         /* el navegador puede negarlo; el gesto sigue andando igual */
       }
-      moviendo(true);
       if (ptrs.size === 1) {
-        arr = { x: e.clientX, y: e.clientY, t: Date.now(), mov: 0, vx: v.current.x, vy: v.current.y };
+        arr = {
+          x: e.clientX,
+          y: e.clientY,
+          mov: 0,
+          vx: v.current.x,
+          vy: v.current.y,
+          dest: (e.target as HTMLElement | null)?.closest?.('[data-n]') as HTMLElement | null,
+        };
         el.style.cursor = 'grabbing';
       } else if (ptrs.size === 2) {
-        const [a, b] = [...ptrs.values()];
-        pin = {
-          d: Math.hypot(a.x - b.x, a.y - b.y) || 1,
-          c: local((a.x + b.x) / 2, (a.y + b.y) / 2),
-          z: v.current.z,
-          x: v.current.x,
-          y: v.current.y,
-        };
+        rebasePin();
         arr = null;
       }
     };
@@ -483,20 +587,43 @@ function SeatMapBase({
 
     const onUp = (e: PointerEvent) => {
       ptrs.delete(e.pointerId);
+      // Cambió el PAR de punteros en uso (tres dedos, se levanta uno): sin
+      // rebasear, `d` se compara contra la distancia del par viejo y el zoom
+      // pega un salto proporcional.
       if (ptrs.size < 2) pin = null;
-      if (ptrs.size > 0) return;
+      else rebasePin();
+
+      if (ptrs.size > 0) {
+        // Al bajar de dos dedos a uno hay que re-basar el paneo con el que
+        // queda: si no, ninguna rama de onMove matchea y la sala queda
+        // congelada bajo el dedo hasta soltar y volver a apoyar.
+        const [q] = [...ptrs.values()];
+        // `mov` arranca pasado del umbral: veníamos de un pinch, no es un tap.
+        if (q) arr = { x: q.x, y: q.y, mov: 99, vx: v.current.x, vy: v.current.y, dest: null };
+        return;
+      }
+
       moviendo(false);
-      el.style.cursor = 'grab';
+      // Condicionado: el visor se renderiza con `cursor: default` en desktop y
+      // React no vuelve a escribirlo (la prop no cambia), así que un 'grab'
+      // imperativo quedaba pegado hasta el unmount.
+      el.style.cursor = movilRef.current ? 'grab' : 'default';
       const a = arr;
       arr = null;
-      // Un arrastre corto y rápido es un tap, no un paneo.
-      if (a && a.mov < 6 && Date.now() - a.t < 450) tap(e);
+      // Quieto es tap, dure lo que dure: lo que separa el paneo del tap es la
+      // DISTANCIA (`mov` es el máximo histórico), no el reloj. Un dedo que duda
+      // medio segundo sobre la butaca sigue siendo un tap deliberado.
+      if (a && a.mov < 6 && e.type !== 'pointercancel') tap(e, a.dest);
       asentar();
     };
 
     const onDbl = (e: MouseEvent) => {
       const g = geoRef.current;
       if (!g || !movilRef.current) return;
+      // El 1.er tap del doble tap ya acercó (butaca chica). Mirar el z
+      // resultante haría que el dbl lo lea como «ya está acercado» y vuelva al
+      // fit: acercar terminaría alejando.
+      if (Date.now() - acerco < 700) return;
       const p = local(e.clientX, e.clientY);
       zoomEn(p.x, p.y, v.current.z > g.zFit * 1.04 ? g.zFit : limZ(DEDO / g.lado));
     };
@@ -524,6 +651,7 @@ function SeatMapBase({
     el.addEventListener('wheel', onWheel, { passive: false });
     el.addEventListener('dblclick', onDbl);
     return () => {
+      rebasarGesto.current = null;
       el.removeEventListener('pointerdown', onDown);
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
@@ -547,7 +675,7 @@ function SeatMapBase({
     if (e.detail === 0) return; // vino del teclado; lo maneja onKeyDown
     const destino = (e.target as HTMLElement).closest('[data-n]') as HTMLElement | null;
     if (!destino?.dataset.n) return;
-    if (tactil.current) return; // en táctil ya lo resolvió el gesto
+    if (gestoResolvio.current) return; // el tap ya resolvió; esto es el click de compatibilidad
     alternarRef.current(destino.dataset.n);
   };
 
@@ -608,6 +736,12 @@ function SeatMapBase({
       e.preventDefault();
       return verToda();
     }
+    // Los controles de zoom viven DENTRO del visor: Enter/Espacio sobre ellos
+    // son suyos. Sin este guard, el preventDefault de abajo les comía el click
+    // (para un <button>, Enter ES el click) y encima alternaba la butaca 0.
+    const enPlano = (e.target as HTMLElement | null)?.closest?.('[data-n]');
+    if (e.target !== e.currentTarget && !enPlano) return;
+
     if (!e.key.startsWith('Arrow') && e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
 
@@ -831,10 +965,28 @@ function SeatMapBase({
 
         <div
           ref={vistaEl}
-          tabIndex={0}
-          role="application"
-          aria-label="Mapa de butacas: flechas para moverte, Enter para elegir"
+          // Roving tabindex canónico: el contenedor es la PUERTA DE ENTRADA solo
+          // mientras ninguna butaca sea focuseable. En cuanto una butaca tiene
+          // tabIndex 0, el contenedor sale del orden de tabulación — si no, el
+          // mapa consumía DOS paradas de Tab.
+          tabIndex={esInteractivo && foco ? -1 : 0}
+          role={esInteractivo ? 'application' : 'group'}
+          aria-label={
+            esInteractivo ? 'Mapa de butacas: flechas para moverte, Enter para elegir' : 'Mapa de butacas'
+          }
           onKeyDown={onKeyDown}
+          onFocus={(e) => {
+            // Al tabular al mapa no hay ninguna butaca enfocada: sin sembrar el
+            // foco no se dibuja ningún anillo (el contenedor tiene outline:none)
+            // y el primer Enter elegiría la butaca 0 a ciegas, sin que el lector
+            // de pantalla la haya nombrado nunca.
+            if (!esInteractivo || e.target !== e.currentTarget) return;
+            if (!e.currentTarget.matches(':focus-visible')) return; // no robar el foco en un tap
+            const n = foco ?? geoRef.current?.orden[0]?.[0]?.n;
+            if (!n) return;
+            pendienteFoco.current = true;
+            setFoco(n);
+          }}
           style={{
             position: 'relative',
             overflow: 'hidden',
@@ -883,7 +1035,17 @@ function SeatMapBase({
                   {b.texto}
                 </button>
               ) : (
-                <div key={b.n} data-n={b.n} aria-label={b.etiqueta} title={b.etiqueta} style={b.estilo}>
+                // `role="img"` porque un div es `generic` y el rol genérico NO
+                // admite nombre accesible: el aria-label se descartaba.
+                <div
+                  key={b.n}
+                  data-n={b.n}
+                  role="img"
+                  tabIndex={b.tab}
+                  aria-label={b.etiqueta}
+                  title={b.etiqueta}
+                  style={b.estilo}
+                >
                   {b.texto}
                 </div>
               ),
@@ -892,6 +1054,7 @@ function SeatMapBase({
 
           {conZoom && (
             <div
+              data-ctrl
               style={{
                 position: 'absolute',
                 right: 10,
@@ -963,11 +1126,14 @@ function SeatMapBase({
               borderRadius: 999,
               whiteSpace: 'nowrap',
               pointerEvents: 'none',
-              opacity: aviso ? 1 : 0,
+              opacity: aviso.txt ? 1 : 0,
               transition: 'opacity .18s ease',
             }}
           >
-            {aviso}
+            {/* El hijo va KEYED por el nonce: si el texto es el mismo string, sin
+                esto no hay mutación de DOM dentro de la región y el lector de
+                pantalla no vuelve a anunciar el segundo rechazo. */}
+            <span key={aviso.n}>{aviso.txt}</span>
           </div>
         </div>
       </div>

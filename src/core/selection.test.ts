@@ -184,3 +184,95 @@ describe('contarHuecos / dejaButacaSuelta', () => {
     });
   });
 });
+
+describe('🔴 el lookahead: no dejar butacas invendibles', () => {
+  const linea = (patron: string, fila = 'A'): LineaPlano => ({
+    letra: fila,
+    top: 0,
+    left: 0,
+    butacas: patron.split('').map((c, i) => ({
+      n: `${fila}-${i + 1}`,
+      fila,
+      numero: String(i + 1),
+      estado: c === 'v' ? ('vendida' as const) : ('libre' as const),
+      accesible: false,
+      left: i * 12,
+      top: 0,
+    })),
+  });
+  const W = 10;
+
+  it('un bloque de 6 libres se puede vaciar entero, de a una', () => {
+    // Sin lookahead esto se trababa en 4: tomar la 5ª deja sola a la 6ª.
+    const l = [linea('llllll')];
+    const sel: string[] = [];
+    for (let i = 1; i <= 6; i++) {
+      const n = `A-${i}`;
+      expect(dejaButacaSuelta(l, sel, n, W), `al tomar ${n}`).toBe(false);
+      sel.push(n);
+    }
+    expect(contarHuecos(l, sel, W)).toBe(0);
+  });
+
+  it('las dos últimas de un bloque siguen siendo alcanzables', () => {
+    const l = [linea('vvvllvvv')];
+    expect(dejaButacaSuelta(l, [], 'A-4', W)).toBe(false);
+    expect(dejaButacaSuelta(l, ['A-4'], 'A-5', W)).toBe(false);
+  });
+
+  it('pero el hueco que NO se puede cerrar sí se rechaza', () => {
+    // 'lll': tomar la del medio deja dos sueltas y ninguna butaca las tapa.
+    expect(dejaButacaSuelta([linea('lll')], [], 'A-2', W)).toBe(true);
+  });
+
+  it('el hueco entre dos bloques vendidos se rechaza', () => {
+    // 'vlv l l': A-2 está sola entre vendidas — tomarla no crea hueco (ya era).
+    // Lo que se rechaza es abrir uno nuevo que nadie pueda tapar.
+    const l = [linea('llvllvll')];
+    // Tomar A-4 deja a A-5 sola contra la vendida: pero A-5 la puede tapar.
+    expect(dejaButacaSuelta(l, [], 'A-4', W)).toBe(false);
+  });
+});
+
+describe('🔴 contarHuecos en orientación vertical', () => {
+  /** Una línea que es COLUMNA: todas comparten `left`, varían en `top`. */
+  const columna = (patron: string, fila = 'A'): LineaPlano => ({
+    letra: fila,
+    top: 0,
+    left: 0,
+    butacas: patron.split('').map((c, i) => ({
+      n: `${fila}-${i + 1}`,
+      fila,
+      numero: String(i + 1),
+      estado: c === 'v' ? ('vendida' as const) : ('libre' as const),
+      accesible: false,
+      left: 0,
+      top: i * 12,
+    })),
+  });
+  const W = 10;
+
+  it('detecta el hueco aunque la línea sea una columna', () => {
+    // Mirando `left` (todas 0) esto daba 0 huecos: el eje no varía.
+    expect(contarHuecos([columna('vlv')], [], W)).toBe(1);
+  });
+
+  it('y el pasillo también corta en el eje vertical', () => {
+    const l: LineaPlano = {
+      letra: 'A',
+      top: 0,
+      left: 0,
+      butacas: [0, 12, 60, 72].map((y, i) => ({
+        n: `A-${i + 1}`,
+        fila: 'A',
+        numero: String(i + 1),
+        estado: 'libre' as const,
+        accesible: false,
+        left: 0,
+        top: y,
+      })),
+    };
+    expect(contarHuecos([l], [], W)).toBe(0);
+    expect(contarHuecos([l], ['A-1'], W)).toBe(1);
+  });
+});
