@@ -19,9 +19,10 @@
  * RESPONSIVE — tres piezas que se combinan:
  *   1. la sala SIEMPRE entra a lo ancho (`ajuste: 'ancho'`), así nunca se
  *      deforma la escala para que algo «entre»;
- *   2. si la pantalla es angosta y la sala es más ancha que profunda, se acuesta
- *      VERTICAL (girada 90°): la pantalla del cine a la izquierda, cada fila una
- *      columna. Se scrollea con el pulgar hacia abajo, que es el gesto natural;
+ *   2. la PANTALLA va arriba y las filas bajan — SIEMPRE. Girar la sala 90° para
+ *      que entre en un celular existe (`orientacion: 'vertical'`) pero NO es el
+ *      default: al girar, la fila A queda a la izquierda y deja de coincidir con
+ *      la barra de pantalla, y eso desorienta más de lo que gana;
  *   3. el ZOOM lo maneja quien mira. Es un multiplicador de la escala, así que
  *      no puede romper el dibujo: agranda los dos ejes por igual.
  */
@@ -44,8 +45,6 @@ import type {
 const LABEL_W = 20;
 /** Techo del lado de la butaca a zoom 1. En web una de 18 px se ve diminuta. */
 const MAX_WEB = 32;
-/** Lo que ocupa la barra de PANTALLA cuando va al costado (orientación vertical). */
-const PANTALLA_W = 28;
 /** Por debajo de esto, `orientacion: 'auto'` considera la pantalla «angosta». */
 const UMBRAL_ANGOSTO = 560;
 
@@ -78,8 +77,14 @@ export interface PropsVista {
    */
   ajuste?: AjusteEscala;
   /**
-   * Cómo se acuesta la sala. `'auto'` (default) la pone VERTICAL en pantallas
-   * angostas cuando la sala es más ancha que profunda.
+   * Cómo se acuesta la sala. Default `'horizontal'`: la PANTALLA arriba y las
+   * filas bajando, que es como se lee un mapa de butacas.
+   *
+   * `'vertical'` la gira 90° (cada fila una columna) para que una sala ancha
+   * entre en un celular. Tiene un costo que hay que aceptar a conciencia: la
+   * fila A pasa a estar a la IZQUIERDA, no arriba, así que deja de coincidir con
+   * la barra de pantalla. En mobile suele ser mejor no girar nada y usar el
+   * zoom, que no cambia la orientación de nada.
    */
   orientacion?: Orientacion;
   /** Controles de zoom. Default: visibles. */
@@ -118,7 +123,7 @@ export interface PropsSeleccion extends PropsVista {
 function SeatMapBase({
   filas,
   ajuste = 'ancho',
-  orientacion = 'auto',
+  orientacion = 'horizontal',
   zoomControls = true,
   zoomInicial = 1,
   minSeat,
@@ -142,16 +147,7 @@ function SeatMapBase({
 
   const plano = useMemo(() => {
     const base = { ajuste, orientacion, labelWidth: LABEL_W, minSeat, maxSeat, zoom };
-    const p0 = calcularPlano(filas, { ...base, width: ancho });
-    if (!p0 || p0.orientacion === 'horizontal') return p0;
-    // En vertical la barra de PANTALLA va al costado y se come ancho. La
-    // orientación puede venir de `'auto'`, así que hay que resolverla primero
-    // para saber cuánto descontar — de ahí el segundo cálculo (es puro y barato).
-    return calcularPlano(filas, {
-      ...base,
-      orientacion: 'vertical',
-      width: Math.max(1, ancho - PANTALLA_W),
-    });
+    return calcularPlano(filas, { ...base, width: ancho });
   }, [filas, ancho, ajuste, orientacion, minSeat, maxSeat, zoom]);
 
   // Índice para devolver la butaca de dominio en el callback: el plano solo
@@ -329,9 +325,13 @@ function SeatMapBase({
         <Zoom valor={zoom} onCambio={setZoom} color={t.rotulo} borde={t.pantalla} />
       )}
 
-      {/* La PANTALLA va del lado al que la sala mira: arriba cuando está
-          horizontal, a la IZQUIERDA cuando está girada. */}
-      {!vertical && rotuloPantalla !== null && (
+      {/* La PANTALLA va SIEMPRE arriba, en las dos orientaciones: es la
+          convención con la que todo el mundo lee un mapa de butacas y moverla
+          de lugar al girar la sala desorienta más de lo que informa.
+          (Ojo: con la sala girada, el lado que mira a la pantalla es el
+          IZQUIERDO — la fila A queda a la izquierda. La barra de arriba es
+          rótulo de lectura, no la posición física.) */}
+      {rotuloPantalla !== null && (
         <>
           <div style={{ height: 6, borderRadius: 999, margin: '0 8px 10px', background: t.pantalla }} />
           <div
@@ -349,33 +349,7 @@ function SeatMapBase({
         </>
       )}
 
-      {plano && vertical && (
-        <div style={{ display: 'flex', alignItems: 'stretch' }}>
-          {rotuloPantalla !== null && (
-            <div style={{ flex: `0 0 ${PANTALLA_W}px`, display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div
-                style={{ width: 6, borderRadius: 999, background: t.pantalla, alignSelf: 'stretch' }}
-              />
-              <div
-                style={{
-                  writingMode: 'vertical-rl',
-                  transform: 'rotate(180deg)',
-                  textTransform: 'uppercase',
-                  fontSize: 9,
-                  letterSpacing: 2,
-                  color: t.rotulo,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {rotuloPantalla}
-              </div>
-            </div>
-          )}
-          <div style={{ flex: 1, minWidth: 0 }}>{scroller}</div>
-        </div>
-      )}
-
-      {plano && !vertical && scroller}
+      {plano && scroller}
     </div>
   );
 }
