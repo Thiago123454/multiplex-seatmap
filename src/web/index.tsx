@@ -239,6 +239,11 @@ function SeatMapBase({
   vpRef.current = vp;
   const movilRef = useRef(movil);
   movilRef.current = movil;
+  // El camino de gestos vive dentro de un efecto que NO tiene `esInteractivo` en
+  // sus deps (se re-suscribiría en cada cambio de selección). Va por ref, igual
+  // que en el renderer nativo.
+  const interactivoRef = useRef(esInteractivo);
+  interactivoRef.current = esInteractivo;
 
   const encajar = useCallback(() => {
     const g = geoRef.current;
@@ -544,6 +549,11 @@ function SeatMapBase({
       } catch {
         /* el navegador puede negarlo; el gesto sigue andando igual */
       }
+      // Se prende ACÁ, que es «empezar el gesto», y `onUp` lo apaga cuando se va
+      // el último puntero. Faltaba la mitad de arriba: `moviendo(false)` era la
+      // única llamada que existía, así que la capa nunca se promovía y el
+      // comentario de la definición describía algo que no pasaba.
+      moviendo(true);
       if (ptrs.size === 1) {
         arr = {
           x: e.clientX,
@@ -634,6 +644,12 @@ function SeatMapBase({
     const onDbl = (e: MouseEvent) => {
       const g = geoRef.current;
       if (!g || !movilRef.current) return;
+      // 🔴 El doble tap SOLO existe en modo vista — misma regla que el nativo.
+      // Donde se elige, cada toque ya alterna una butaca: los dos clicks del
+      // doble la eligen y la desecogen (net cero, y el `onToggle` sale dos veces),
+      // y encima el `dblclick` movía el encuadre. Elegir dos veces seguidas no
+      // puede significar «zoom».
+      if (interactivoRef.current) return;
       // El 1.er tap del doble tap ya acercó (butaca chica). Mirar el z
       // resultante haría que el dbl lo lea como «ya está acercado» y vuelva al
       // fit: acercar terminaría alejando.
