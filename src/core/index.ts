@@ -30,6 +30,8 @@ export {
   TOL_LINEA,
 } from './layout';
 
+export { familiaNativa, colorSolido } from './css';
+
 export { parseEtiqueta, formatearEtiqueta } from './etiqueta';
 export type { Etiqueta } from './etiqueta';
 
