@@ -98,7 +98,7 @@ const LABEL_W = 20;
  * en ABSOLUTO: no aportan alto. Montado en un contenedor de alto automático, sin
  * este piso el visor mediría cero y el mapa se renderizaría en blanco.
  */
-const MIN_VISOR = 200;
+const MIN_VISOR = 160;
 /** Movimiento (px) que separa un tap de un paneo. */
 const UMBRAL_TAP = 6;
 /** Ventana del doble tap. */
@@ -607,6 +607,14 @@ function SeatMapBase({
       /** ts del último tap que ACERCÓ: el doble tap no puede deshacerlo. */
       acerco: 0,
       ultimoTap: { t: 0, x: 0, y: 0 },
+      /**
+       * Dónde estaban los dedos la última vez que se los vio.
+       *
+       * Existe solo para `rebasarGesto`, que corre desde afuera del gesto (lo
+       * llama el efecto de layout) y ahí no hay ningún evento del que leerlos.
+       * El renderer web no lo necesita porque tiene el `Map` de punteros vivos.
+       */
+      ultimos: [] as Toque[],
     };
 
     const local = (pageX: number, pageY: number) => ({
@@ -615,22 +623,33 @@ function SeatMapBase({
     });
 
     type Toque = { pageX: number; pageY: number };
+    // Copia, no referencia: React Native reusa el objeto del evento, así que
+    // guardarse `nativeEvent.touches` deja punteros a datos que van a cambiar.
     const toques = (e: GestureResponderEvent): Toque[] =>
-      (e.nativeEvent.touches ?? []) as unknown as Toque[];
+      ((e.nativeEvent.touches ?? []) as unknown as Toque[]).map((t) => ({
+        pageX: t.pageX,
+        pageY: t.pageY,
+      }));
+
+    /** Foto del pinch con el par de dedos `ts` y el encuadre ACTUAL. */
+    const fotoPin = (ts: Toque[]) => {
+      const [a, b] = ts;
+      const c = local((a.pageX + b.pageX) / 2, (a.pageY + b.pageY) / 2);
+      return {
+        d: Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY) || 1,
+        cx: c.x,
+        cy: c.y,
+        z: v.current.z,
+        x: v.current.x,
+        y: v.current.y,
+      };
+    };
 
     /** Vuelve a tomar la foto con los dedos que hay AHORA y el encuadre actual. */
     const rebasar = (ts: Toque[]) => {
+      g$.ultimos = ts;
       if (ts.length >= 2) {
-        const [a, b] = ts;
-        const c = local((a.pageX + b.pageX) / 2, (a.pageY + b.pageY) / 2);
-        g$.pin = {
-          d: Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY) || 1,
-          cx: c.x,
-          cy: c.y,
-          z: v.current.z,
-          x: v.current.x,
-          y: v.current.y,
-        };
+        g$.pin = fotoPin(ts);
         g$.arr = null;
       } else if (ts.length === 1) {
         const [a] = ts;
@@ -650,18 +669,26 @@ function SeatMapBase({
       g$.n = ts.length;
     };
 
+    /**
+     * El encuadre cambió por fuera del gesto (el visor se redimensionó, o el host
+     * refrescó las butacas) con el dedo apoyado: la foto quedó tomada contra el
+     * encuadre viejo y hay que rehacerla.
+     *
+     * 🔴 Tiene que rehacerla ENTERA. Pisar solo el encuadre (`vx/vy`, `pin.z`)
+     * y dejar la posición de los dedos (`arr.x`, `pin.d`) hace que el próximo
+     * frame vuelva a contar un delta que YA se aplicó: el paneo salta lo que
+     * llevabas paneado, y el pinch aplica el factor al CUADRADO (con los dedos
+     * quietos) hasta clavarse en el tope. Es el mismo criterio que el
+     * `rebasarGesto` del web, que relee sus punteros vivos.
+     *
+     * `mov` sobrevive a propósito: es el historial de cuánto se movió el dedo, y
+     * borrarlo convertiría un paneo largo en un tap al soltar.
+     */
     rebasarGesto.current = () => {
-      // El visor cambió de tamaño con el dedo apoyado: la foto está tomada
-      // contra el encuadre viejo. Sin argumentos no se puede releer los dedos,
-      // así que se re-basa el encuadre, que es lo que saltaría.
-      if (g$.pin) {
-        g$.pin.z = v.current.z;
-        g$.pin.x = v.current.x;
-        g$.pin.y = v.current.y;
-      }
-      if (g$.arr) {
-        g$.arr.vx = v.current.x;
-        g$.arr.vy = v.current.y;
+      const ts = g$.ultimos;
+      if (g$.pin && ts.length >= 2) g$.pin = fotoPin(ts);
+      else if (g$.arr && ts.length === 1) {
+        g$.arr = { ...g$.arr, x: ts[0].pageX, y: ts[0].pageY, vx: v.current.x, vy: v.current.y };
       }
     };
 
@@ -724,6 +751,7 @@ function SeatMapBase({
           rebasar(ts);
           return;
         }
+        g$.ultimos = ts;
 
         if (ts.length >= 2 && g$.pin) {
           const [a, b] = ts;
@@ -750,6 +778,7 @@ function SeatMapBase({
 
       onPanResponderRelease: (e) => {
         const a = g$.arr;
+        g$.ultimos = [];
         const p = local(e.nativeEvent.pageX, e.nativeEvent.pageY);
         g$.n = 0;
         g$.arr = null;
@@ -763,6 +792,7 @@ function SeatMapBase({
       },
 
       onPanResponderTerminate: () => {
+        g$.ultimos = [];
         g$.n = 0;
         g$.arr = null;
         g$.pin = null;
