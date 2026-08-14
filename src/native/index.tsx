@@ -757,13 +757,26 @@ function SeatMapBase({
           const [a, b] = ts;
           const d = Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY) || 1;
           const c = local((a.pageX + b.pageX) / 2, (a.pageY + b.pageY) / 2);
-          const z = limZ(g$.pin.z * (d / g$.pin.d));
+          const bruto = g$.pin.z * (d / g$.pin.d); // lo que PIDIO el gesto
+          const z = limZ(bruto); // lo que se puede dar
           const k = z / g$.pin.z;
           v.current.x = c.x - (g$.pin.cx - g$.pin.x) * k;
           v.current.y = c.y - (g$.pin.cy - g$.pin.y) * k;
           v.current.z = z;
           encajar();
           aplicar();
+          // 🔴 El clamp mordio: `z` no es lo que pidieron los dedos. Si la foto NO se
+          // rehace aca, el gesto guarda zoom que nunca se aplico, y volver a abrir los
+          // dedos lo devuelve ENTERO: con los dedos en la separacion original el
+          // encuadre volvia EXACTO al del arranque, despues de una zona muerta en la
+          // que apretar no hacia nada. Se rehace contra el encuadre YA clampeado (por
+          // eso va despues de `encajar`), asi el pinch responde desde el tope apenas
+          // invertis el gesto. Vale igual para `zMax`: el defecto era simetrico.
+          //
+          // El `!==` no necesita epsilon: `Math.min`/`Math.max` devuelven EL MISMO
+          // double cuando no clampean, asi que un pinch que no toca los topes queda
+          // bit-identico a como estaba.
+          if (Number.isFinite(bruto) && z !== bruto) g$.pin = fotoPin(ts);
         } else if (ts.length === 1 && g$.arr) {
           const [a] = ts;
           const dx = a.pageX - g$.arr.x;

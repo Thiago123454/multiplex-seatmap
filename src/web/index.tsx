@@ -567,13 +567,27 @@ function SeatMapBase({
         const [a, b] = [...ptrs.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
         const c = local((a.x + b.x) / 2, (a.y + b.y) / 2);
-        const z = limZ(pin.z * (d / pin.d));
+        const bruto = pin.z * (d / pin.d); // lo que PIDIO el gesto
+        const z = limZ(bruto); // lo que se puede dar
         const k = z / pin.z;
         v.current.x = c.x - (pin.c.x - pin.x) * k;
         v.current.y = c.y - (pin.c.y - pin.y) * k;
         v.current.z = z;
         encajar();
         aplicar();
+        // 🔴 El clamp mordio: `z` no es lo que pidieron los dedos. Si la foto NO se
+        // rehace aca, el gesto guarda zoom que nunca se aplico, y volver a abrir los
+        // dedos lo devuelve ENTERO: con los dedos en la separacion original el
+        // encuadre volvia EXACTO al del arranque, despues de una zona muerta en la
+        // que apretar no hacia nada. Se rehace contra el encuadre YA clampeado (por
+        // eso va despues de `encajar`). Vale igual para `zMax`: era simetrico.
+        //
+        // Foto INLINE y no `rebasePin()`: esa relee los punteros y llama a `local()`,
+        // que hace `getBoundingClientRect()` — un reflow sincronico por frame de pinch.
+        // `d` y `c` ya estan calculados arriba y son los mismos valores.
+        if (Number.isFinite(bruto) && z !== bruto) {
+          pin = { d, c, z: v.current.z, x: v.current.x, y: v.current.y };
+        }
       } else if (arr) {
         const dx = e.clientX - arr.x;
         const dy = e.clientY - arr.y;
