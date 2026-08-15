@@ -43,3 +43,6 @@ export {
   dejaButacaSuelta,
 } from './selection';
 export type { ReglasSeleccion, MotivoRechazo, ResultadoElegir } from './selection';
+
+export { PINCH_MIN, limitarZoom, separacion, fotoPinch, pasoPinch } from './gesto';
+export type { TopesZoom, Encuadre, FotoPinch, PasoPinch } from './gesto';

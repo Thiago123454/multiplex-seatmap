@@ -65,13 +65,18 @@ import {
   contarHuecos,
   dejaButacaSuelta,
   familiaNativa,
+  fotoPinch,
+  limitarZoom,
+  pasoPinch,
   puedeElegir,
+  separacion,
   TEMA_DEFAULT,
 } from '../core';
 import type {
   Butaca,
   ButacaPlano,
   FilaButacas,
+  FotoPinch,
   MotivoRechazo,
   PlanoSala,
   ReglasSeleccion,
@@ -376,7 +381,7 @@ function SeatMapBase({
   const limZ = useCallback((z: number) => {
     const g = geoRef.current;
     if (!g) return z;
-    return Math.min(g.zMax, Math.max(g.zFit, z));
+    return limitarZoom(z, g);
   }, []);
 
   /** Zoom anclado en un punto del visor: ese punto no se mueve. */
@@ -601,7 +606,7 @@ function SeatMapBase({
       /** Paneo de un dedo. */
       arr: null as null | { x: number; y: number; mov: number; vx: number; vy: number },
       /** Pinch de dos dedos. */
-      pin: null as null | { d: number; cx: number; cy: number; z: number; x: number; y: number },
+      pin: null as null | FotoPinch,
       /** Butaca que había bajo el dedo cuando bajó. El destino se decide al APOYAR. */
       destino: null as ButacaPlano | null,
       /** ts del último tap que ACERCÓ: el doble tap no puede deshacerlo. */
@@ -631,18 +636,20 @@ function SeatMapBase({
         pageY: t.pageY,
       }));
 
-    /** Foto del pinch con el par de dedos `ts` y el encuadre ACTUAL. */
-    const fotoPin = (ts: Toque[]) => {
+    /**
+     * Foto del pinch con el par de dedos `ts` y el encuadre ACTUAL.
+     *
+     * 🔑 Guarda la separación CRUDA. El piso contra las yemas pegadas no vive acá
+     * sino en `pasoPinch`, sobre la ganancia — justamente para que esta foto y la
+     * del rebase del clamp no tengan que ponerse de acuerdo. Esta se toma en TODO
+     * cambio de la cantidad de dedos (`rebasar`, y el digitalizador que funde los
+     * dos contactos al tocarse las yemas y los vuelve a separar), y cualquier
+     * regla que viviera acá habría que repetirla allá.
+     */
+    const fotoPin = (ts: Toque[]): FotoPinch => {
       const [a, b] = ts;
       const c = local((a.pageX + b.pageX) / 2, (a.pageY + b.pageY) / 2);
-      return {
-        d: Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY) || 1,
-        cx: c.x,
-        cy: c.y,
-        z: v.current.z,
-        x: v.current.x,
-        y: v.current.y,
-      };
+      return fotoPinch(separacion(a.pageX, a.pageY, b.pageX, b.pageY), c.x, c.y, v.current);
     };
 
     /** Vuelve a tomar la foto con los dedos que hay AHORA y el encuadre actual. */
@@ -753,30 +760,25 @@ function SeatMapBase({
         }
         g$.ultimos = ts;
 
-        if (ts.length >= 2 && g$.pin) {
+        const g = geoRef.current;
+        if (ts.length >= 2 && g$.pin && g) {
           const [a, b] = ts;
-          const d = Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY) || 1;
+          const d = separacion(a.pageX, a.pageY, b.pageX, b.pageY);
           const c = local((a.pageX + b.pageX) / 2, (a.pageY + b.pageY) / 2);
-          const bruto = g$.pin.z * (d / g$.pin.d); // lo que PIDIO el gesto
-          const z = limZ(bruto); // lo que se puede dar
-          const k = z / g$.pin.z;
-          v.current.x = c.x - (g$.pin.cx - g$.pin.x) * k;
-          v.current.y = c.y - (g$.pin.cy - g$.pin.y) * k;
-          v.current.z = z;
+          const paso = pasoPinch(g$.pin, d, c.x, c.y, g);
+          v.current.x = paso.x;
+          v.current.y = paso.y;
+          v.current.z = paso.z;
           encajar();
           aplicar();
-          // 🔴 El clamp mordio: `z` no es lo que pidieron los dedos. Si la foto NO se
-          // rehace aca, el gesto guarda zoom que nunca se aplico, y volver a abrir los
-          // dedos lo devuelve ENTERO: con los dedos en la separacion original el
-          // encuadre volvia EXACTO al del arranque, despues de una zona muerta en la
-          // que apretar no hacia nada. Se rehace contra el encuadre YA clampeado (por
-          // eso va despues de `encajar`), asi el pinch responde desde el tope apenas
-          // invertis el gesto. Vale igual para `zMax`: el defecto era simetrico.
-          //
-          // El `!==` no necesita epsilon: `Math.min`/`Math.max` devuelven EL MISMO
-          // double cuando no clampean, asi que un pinch que no toca los topes queda
-          // bit-identico a como estaba.
-          if (Number.isFinite(bruto) && z !== bruto) g$.pin = fotoPin(ts);
+          // 🔴 El clamp mordió: `z` no es lo que pidieron los dedos. Si la foto NO se
+          // rehace acá, el gesto guarda zoom que nunca se aplicó, y volver a abrir los
+          // dedos lo devuelve ENTERO: con los dedos en la separación original el
+          // encuadre volvía EXACTO al del arranque, después de una zona muerta en la
+          // que apretar no hacía nada. Se rehace contra el encuadre YA clampeado —por
+          // eso va después de `encajar`—, así el pinch responde desde el tope apenas
+          // invertís el gesto. Vale igual para `zMax`: la zona muerta era simétrica.
+          if (paso.mordio) g$.pin = fotoPin(ts);
         } else if (ts.length === 1 && g$.arr) {
           const [a] = ts;
           const dx = a.pageX - g$.arr.x;
