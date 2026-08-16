@@ -136,7 +136,7 @@ canvas, PDF).
 |---|---|
 | **100 %** | la sala entera (`zFit`) |
 | **Techo** | la escala a la que la butaca llega a 46 px — el tamaño con el que un dedo no falla |
-| **Gestos** | pinch, pan a un dedo, doble tap, ⌘/Ctrl + rueda para zoom, rueda para pan |
+| **Gestos** | pinch, pan a un dedo, ⌘/Ctrl + rueda para zoom, rueda para pan |
 | **Dónde** | solo debajo de **768 px del ancho del PROPIO componente** (no del viewport) |
 
 ⚠️ **El componente se mide a sí mismo.** Si lo metés en una columna de 700 px
@@ -144,12 +144,17 @@ dentro de un desktop de 1400, se pone en modo mobile — con gestos y control de
 zoom. Es lo correcto (se adapta a su caja), pero sorprende: si querés el modo
 desktop, dale ancho o forzá `zoomControls={false}`.
 
-**Tap sobre butaca chica = acercar, no elegir.** Con el dedo, por debajo de 22 px
-un tap acerca esa zona hasta 38 px en vez de seleccionar: elegir a 8 px no es
-elegir, es adivinar. 🔴 **Ese umbral NO se le aplica al mouse**: el cursor acierta
-a 19 px y en desktop no hay control de zoom con el que agrandar — aplicárselo deja
-la sala entera incliqueable en cuanto la butaca baja de 22 px, que es lo normal en
-una sala de 293.
+🔴 **Un toque nunca mueve el encuadre.** Tocar una butaca la elige y nada más:
+acercar es del pinch, de los controles y de la rueda. Vale igual para el dedo y
+para el mouse, en los dos renderers y en los dos modos — sin excepciones.
+
+*Hubo hasta el 2026-08-15 dos gestos que sí movían el encuadre y se sacaron: el
+**doble tap** (alternaba sala entera ↔ butaca a 46 px) y el **tap sobre butaca
+chica** (por debajo de 22 px el toque llevaba la zona a 38 px en vez de elegir).
+El segundo estaba, en la práctica, siempre activo: en un celular con una sala de
+293 la butaca mide 8-10 px, así que el primer toque no elegía nunca. La regla que
+lo reemplaza es más simple y no necesita umbrales: **primero acercás, después
+elegís.*** Ver `decisiones/el-mapa-de-butacas-no-es-una-grilla.md` en el wiki.
 
 **La PANTALLA vive FUERA del área que se transforma.** Es la referencia física de
 la sala: se acercan y panean las butacas, la pantalla se queda quieta, a todo el

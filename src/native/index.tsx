@@ -28,10 +28,14 @@
  *    física de la sala: se acercan y panean las butacas, la pantalla se queda
  *    quieta, a todo el ancho y arriba de todo.
  *
- * 4. **Tap sobre butaca chica = acercar, no elegir.** Por debajo de 22 px, tocar
- *    acerca esa zona hasta 38 px. Elegir a 8 px no es elegir, es adivinar — y el
- *    rebote se paga en la caja. Vale también en modo vista: ahí acercar ES la
- *    única razón por la que un acomodador toca la sala.
+ * 4. 🔴 **UN TOQUE NUNCA MUEVE EL ENCUADRE.** Tocar una butaca la elige y nada
+ *    más; acercar es del pinch y de los controles. Hubo hasta el 2026-08-15 un
+ *    «tap sobre butaca chica = acercar» (por debajo de 22 px el toque llevaba la
+ *    zona a 38 px en vez de elegir) y se sacó: como la butaca en un celular mide
+ *    8-10 px, ese umbral estaba SIEMPRE activo ⇒ el primer toque no elegía nunca.
+ *    La regla nueva es **primero acercás, después elegís**, con el gesto que ya
+ *    existe. ⚠️ Consecuencia acá: en modo VISTA el tap deja de hacer nada — que
+ *    es lo correcto, porque en vista no hay nada que elegir.
  *
  * 5. **El visor CAPTURA el toque y la butaca se resuelve por GEOMETRÍA.** No hay
  *    293 `Pressable`: hay 293 `View` mudas y un solo responder que invierte el
@@ -44,6 +48,13 @@
  *    dice que no y `onShouldBlockNativeResponder` bloquea el scroll nativo: sin
  *    eso, un `ScrollView` vertical arriba del mapa se queda con el paneo y la
  *    sala no se mueve para abajo. El host igual no debería envolverlo en uno.
+ *
+ * 7. 🔴 **NO hay doble tap.** Se sacó a propósito (2026-08-15), a la par del
+ *    renderer web, donde daba un bug real: el `dblclick` vivía en el visor y los
+ *    controles de zoom son hijos suyos, así que apretar «−» dos veces zoomeaba
+ *    al máximo. Acá los controles son HERMANOS (decisión 5) y ese camino no
+ *    existía, pero el gesto se va igual para que las dos plataformas se sientan
+ *    iguales: acercar es el pinch, los controles, o el tap sobre butaca chica.
  *
  * SIN `StyleSheet` para lo que depende del plano: el posicionamiento (absoluto,
  * medidas en px que salen del cálculo) es parte de la CORRECCIÓN del componente
@@ -85,10 +96,6 @@ import type {
 
 /** Techo del lado de la butaca en el plano base (antes del zoom). */
 const MAX_SEAT = 32;
-/** Por debajo de este lado en px, un tap ACERCA en vez de elegir. */
-const TAP_MIN = 22;
-/** A cuánto lleva la butaca ese tap de acercamiento. */
-const TAP_OBJ = 38;
 /** Lado con el que un dedo no falla. Define el techo del zoom. */
 const DEDO = 46;
 /** Cuánto puede pasarse «ver toda la sala» de la escala base cuando sobra lugar. */
@@ -106,10 +113,6 @@ const LABEL_W = 20;
 const MIN_VISOR = 160;
 /** Movimiento (px) que separa un tap de un paneo. */
 const UMBRAL_TAP = 6;
-/** Ventana del doble tap. */
-const DOBLE_MS = 300;
-/** Cuánto tolera el doble tap que el segundo toque caiga corrido. */
-const DOBLE_PX = 32;
 /** Debounce del «asentar»: qué texto entra en la butaca se decide al soltar. */
 const ASENTAR_MS = 130;
 
@@ -515,9 +518,6 @@ function SeatMapBase({
   const alternarRef = useRef(alternarN);
   alternarRef.current = alternarN;
 
-  const interactivoRef = useRef(esInteractivo);
-  interactivoRef.current = esInteractivo;
-
   /* ── gestos ────────────────────────────────────────────────────────────── */
 
   const visorRef = useRef<View | null>(null);
@@ -609,9 +609,6 @@ function SeatMapBase({
       pin: null as null | FotoPinch,
       /** Butaca que había bajo el dedo cuando bajó. El destino se decide al APOYAR. */
       destino: null as ButacaPlano | null,
-      /** ts del último tap que ACERCÓ: el doble tap no puede deshacerlo. */
-      acerco: 0,
-      ultimoTap: { t: 0, x: 0, y: 0 },
       /**
        * Dónde estaban los dedos la última vez que se los vio.
        *
@@ -699,33 +696,12 @@ function SeatMapBase({
       }
     };
 
-    const tap = (px: number, py: number) => {
-      const g = geoRef.current;
-      if (!g) return;
-      const ahora = Date.now();
-      const prev = g$.ultimoTap;
-      const doble =
-        ahora - prev.t < DOBLE_MS && Math.hypot(px - prev.x, py - prev.y) < DOBLE_PX;
-      g$.ultimoTap = { t: ahora, x: px, y: py };
-
-      // El doble tap solo existe en modo VISTA. Donde se elige, cada toque ya
-      // alterna una butaca: agregarle un segundo significado al segundo toque
-      // haría que elegir dos veces seguidas mueva el encuadre.
-      if (doble && !interactivoRef.current) {
-        // El 1.er tap del doble ya acercó (butaca chica). Mirar el z resultante
-        // haría que el doble lo lea como «ya está acercado» y vuelva al fit:
-        // acercar terminaría alejando.
-        if (ahora - g$.acerco < 700) return;
-        return zoomEn(px, py, v.current.z > g.zFit * 1.04 ? g.zFit : limZ(DEDO / g.lado));
-      }
-
+    // 🔴 Un tap NO mueve el encuadre —ni por doble tap ni por butaca chica—:
+    // elige, o no hace nada. Ver decisiones 4 y 7. Por eso no necesita las
+    // coordenadas: el destino ya se resolvió al APOYAR, en `onPanResponderGrant`.
+    const tap = () => {
       // Un tap en el vacío (pasillo, margen) no hace nada.
       if (!g$.destino) return;
-      // Elegir a 8 px no es elegir, es adivinar: primero se acerca.
-      if (g.lado * v.current.z < TAP_MIN) {
-        g$.acerco = ahora;
-        return zoomEn(px, py, TAP_OBJ / g.lado);
-      }
       alternarRef.current(g$.destino.n);
     };
 
@@ -791,17 +767,16 @@ function SeatMapBase({
         }
       },
 
-      onPanResponderRelease: (e) => {
+      onPanResponderRelease: () => {
         const a = g$.arr;
         g$.ultimos = [];
-        const p = local(e.nativeEvent.pageX, e.nativeEvent.pageY);
         g$.n = 0;
         g$.arr = null;
         g$.pin = null;
         // Quieto es tap, dure lo que dure: lo que separa el paneo del tap es la
         // DISTANCIA (`mov` es el máximo histórico), no el reloj. Un dedo que
         // duda medio segundo sobre la butaca sigue siendo un tap deliberado.
-        if (a && a.mov < UMBRAL_TAP) tap(p.x, p.y);
+        if (a && a.mov < UMBRAL_TAP) tap();
         g$.destino = null;
         asentar();
       },
@@ -815,7 +790,10 @@ function SeatMapBase({
         asentar();
       },
     });
-  }, [butacaEn, latcharOrigen, encajar, aplicar, asentar, limZ, zoomEn]);
+    // `zoomEn` ya no es dep: desde la decisión 4 ningún gesto de un dedo mueve
+    // el encuadre, así que el camino de toques no lo llama. El pinch escribe
+    // `v.current` directo y el zoom por control vive fuera de este `useMemo`.
+  }, [butacaEn, latcharOrigen, encajar, aplicar, asentar]);
 
   useEffect(() => () => { rebasarGesto.current = null; }, []);
 

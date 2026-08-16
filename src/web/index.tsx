@@ -27,9 +27,15 @@
  *    física de la sala: se acercan y panean las butacas, la pantalla se queda
  *    quieta, a todo el ancho y arriba de todo.
  *
- * 4. **Tap sobre butaca chica = acercar, no elegir.** Por debajo de 22 px, tocar
- *    acerca esa zona hasta 38 px. Elegir a 8 px no es elegir, es adivinar — y el
- *    rebote se paga en la caja.
+ * 4. 🔴 **UN TOQUE NUNCA MUEVE EL ENCUADRE.** Tocar una butaca la elige y nada
+ *    más; acercar es del pinch, de los controles y de la rueda. Hubo hasta el
+ *    2026-08-15 un «tap sobre butaca chica = acercar» (por debajo de 22 px el
+ *    toque llevaba la zona a 38 px en vez de elegir) y se sacó: como la butaca
+ *    en un celular mide 8-10 px, ese umbral estaba SIEMPRE activo, así que en la
+ *    práctica el primer toque no elegía nunca. La respuesta del dueño al planteo
+ *    de «elegir a 8 px es adivinar» fue la correcta y es la regla nueva:
+ *    **primero acercás, después elegís** — con el gesto que ya existe, no con
+ *    uno que el componente decide por vos.
  *
  * 5. **El zoom es de mobile.** Debajo de 768 px aparecen los controles y los
  *    gestos. En desktop la sala entra entera a una escala en la que la butaca ya
@@ -38,6 +44,16 @@
  * 6. **Un solo tab stop.** Los 292 botones dejaron de ser 292 paradas de
  *    tabulación: se entra una vez y adentro se navega con flechas (roving
  *    tabindex), Enter/Espacio para elegir.
+ *
+ * 7. 🔴 **NO hay doble tap.** Se sacó a propósito (2026-08-15) y no se vuelve a
+ *    agregar sin resolver esto: el `dblclick` se escuchaba en el VISOR, y los
+ *    controles de zoom son hijos suyos, así que apretar «−» dos veces seguidas
+ *    burbujeaba un `dblclick` que zoomeaba al máximo sobre la esquina del botón
+ *    — alejar terminaba acercando. El guard de `[data-ctrl]` existía en
+ *    `pointerdown` pero no en `dblclick`. Más de fondo: el doble tap tapaba una
+ *    ventana de 700 ms del tap-que-acerca, solo valía en modo vista, y todo lo
+ *    que hacía ya lo hacen el pinch y los controles. Un gesto que necesita tres
+ *    excepciones para no chocar con los otros no se estaba ganando el lugar.
  *
  * ESTILOS INLINE, no clases de utilidad. El posicionamiento (relative en el
  * contenedor, absolute en las butacas) es parte de la CORRECCIÓN del componente:
@@ -77,10 +93,6 @@ import type {
 
 /** Techo del lado de la butaca en el plano base (antes del zoom). */
 const MAX_SEAT = 32;
-/** Por debajo de este lado en px, un tap ACERCA en vez de elegir. */
-const TAP_MIN = 22;
-/** A cuánto lleva la butaca ese tap de acercamiento. */
-const TAP_OBJ = 38;
 /** Lado con el que un dedo no falla. Define el techo del zoom. */
 const DEDO = 46;
 /** Debajo de esto hay gestos y controles de zoom. */
@@ -250,11 +262,6 @@ function SeatMapBase({
   vpRef.current = vp;
   const movilRef = useRef(movil);
   movilRef.current = movil;
-  // El camino de gestos vive dentro de un efecto que NO tiene `esInteractivo` en
-  // sus deps (se re-suscribiría en cada cambio de selección). Va por ref, igual
-  // que en el renderer nativo.
-  const interactivoRef = useRef(esInteractivo);
-  interactivoRef.current = esInteractivo;
 
   const encajar = useCallback(() => {
     const g = geoRef.current;
@@ -491,8 +498,6 @@ function SeatMapBase({
     };
     let arr: Arrastre | null = null;
     let pin: FotoPinch | null = null;
-    /** ts del último tap que ACERCÓ: el doble tap no puede deshacerlo. */
-    let acerco = 0;
 
     const local = (cx: number, cy: number) => {
       const r = el.getBoundingClientRect();
@@ -522,22 +527,15 @@ function SeatMapBase({
      * `setPointerCapture` retargetea todos los eventos de ese pointerId al
      * elemento capturador (el visor), así que en el pointerup `e.target` ya no
      * es la butaca y `closest('[data-n]')` daba null SIEMPRE: en táctil no se
-     * podía elegir NINGUNA butaca una vez pasado el umbral de 22 px.
+     * podía elegir NINGUNA butaca. (En su momento el síntoma quedó tapado por
+     * el tap-que-acerca, que no usaba el destino; ese ya no existe — decisión 4
+     * — así que hoy este bug se vería de una.)
      */
-    const tap = (e: PointerEvent, destino: HTMLElement | null) => {
-      const g = geoRef.current;
-      if (!g) return;
-      // Un tap en el vacío (pasillo, margen, control) no hace nada. Sin esto,
-      // tocar el botón «+» caía en la rama de acercar con las coordenadas del
-      // botón y pegaba un salto de encuadre.
+    const tap = (destino: HTMLElement | null) => {
+      // Un tap en el vacío (pasillo, margen, control) no hace nada.
       if (!destino?.dataset.n) return;
       gestoResolvio.current = true;
-      const p = local(e.clientX, e.clientY);
-      // Elegir a 8 px no es elegir, es adivinar: primero se acerca.
-      if (g.lado * v.current.z < TAP_MIN) {
-        acerco = Date.now();
-        return zoomEn(p.x, p.y, TAP_OBJ / g.lado);
-      }
+      // 🔴 Un tap NO mueve el encuadre: elige, o no hace nada. Ver decisión 4.
       alternarRef.current(destino.dataset.n);
     };
 
@@ -650,25 +648,8 @@ function SeatMapBase({
       // Quieto es tap, dure lo que dure: lo que separa el paneo del tap es la
       // DISTANCIA (`mov` es el máximo histórico), no el reloj. Un dedo que duda
       // medio segundo sobre la butaca sigue siendo un tap deliberado.
-      if (a && a.mov < 6 && e.type !== 'pointercancel') tap(e, a.dest);
+      if (a && a.mov < 6 && e.type !== 'pointercancel') tap(a.dest);
       asentar();
-    };
-
-    const onDbl = (e: MouseEvent) => {
-      const g = geoRef.current;
-      if (!g || !movilRef.current) return;
-      // 🔴 El doble tap SOLO existe en modo vista — misma regla que el nativo.
-      // Donde se elige, cada toque ya alterna una butaca: los dos clicks del
-      // doble la eligen y la desecogen (net cero, y el `onToggle` sale dos veces),
-      // y encima el `dblclick` movía el encuadre. Elegir dos veces seguidas no
-      // puede significar «zoom».
-      if (interactivoRef.current) return;
-      // El 1.er tap del doble tap ya acercó (butaca chica). Mirar el z
-      // resultante haría que el dbl lo lea como «ya está acercado» y vuelva al
-      // fit: acercar terminaría alejando.
-      if (Date.now() - acerco < 700) return;
-      const p = local(e.clientX, e.clientY);
-      zoomEn(p.x, p.y, v.current.z > g.zFit * 1.04 ? g.zFit : limZ(DEDO / g.lado));
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -692,7 +673,7 @@ function SeatMapBase({
     el.addEventListener('pointerup', onUp);
     el.addEventListener('pointercancel', onUp);
     el.addEventListener('wheel', onWheel, { passive: false });
-    el.addEventListener('dblclick', onDbl);
+    // 🔴 Acá NO va un `dblclick`. Ver decisión 7: el doble tap se sacó.
     return () => {
       rebasarGesto.current = null;
       el.removeEventListener('pointerdown', onDown);
@@ -700,19 +681,16 @@ function SeatMapBase({
       el.removeEventListener('pointerup', onUp);
       el.removeEventListener('pointercancel', onUp);
       el.removeEventListener('wheel', onWheel);
-      el.removeEventListener('dblclick', onDbl);
     };
-  }, [limZ, encajar, aplicar, asentar, zoomEn, moviendo]);
+  }, [encajar, aplicar, asentar, zoomEn, moviendo]);
 
   /**
    * Click de MOUSE. En desktop no hay gestos, así que va directo.
    *
-   * 🔴 Acá NO va el umbral de `TAP_MIN`. Ese umbral existe porque un DEDO sobre
-   * una butaca de 8 px no elige, adivina — pero un cursor acierta a 19 px sin
-   * problema, y en desktop no hay control de zoom con el que agrandar.
-   * Aplicárselo al mouse deja la sala entera incliqueable en cuanto la butaca
-   * baja de 22 px, que es lo normal en una sala de 293. El guard vive en `tap()`,
-   * que es el camino táctil.
+   * Desde la decisión 4 hace exactamente lo mismo que el `tap()` táctil: elegir,
+   * sin umbral de tamaño de por medio. Antes eran dos reglas distintas —el mouse
+   * elegía siempre y el dedo primero acercaba— y esa asimetría fue justamente lo
+   * que se sacó.
    */
   const onClickPlano = (e: ReactMouseEvent) => {
     if (e.detail === 0) return; // vino del teclado; lo maneja onKeyDown
