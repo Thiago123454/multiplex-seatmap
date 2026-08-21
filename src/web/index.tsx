@@ -1014,6 +1014,23 @@ function SeatMapBase({
             touchAction: movil ? 'none' : 'auto',
             outline: 'none',
             cursor: movil ? 'grab' : 'default',
+            // 🔴 El visor es una superficie que se ARRASTRA, no un texto que se lee.
+            //
+            // Sin esto, panear con el MOUSE arranca una selección de texto: el cajero termina con
+            // media sala celeste en vez de moverla, y el arrastre pelea contra la selección
+            // nativa. `touchAction: 'none'` de arriba tapa el gesto TÁCTIL y no hace nada contra
+            // el mouse — son dos mecanismos distintos y hacen falta los dos.
+            //
+            // Va incondicional, y no atado a `movil`: no hay ningún modo de este componente en el
+            // que seleccionar el número de una butaca sirva para algo. Con un dedo también molesta
+            // (mantener apretado abre el menú de selección encima de la sala).
+            //
+            // Y va acá, en el visor, en vez de en cada butaca: `user-select` se HEREDA, así que
+            // una sola declaración cubre butacas, rótulos de fila y la barra de PANTALLA. Ponerlo
+            // por butaca dejaba seleccionables justamente los rótulos, que es de donde arranca el
+            // arrastre cuando el cajero agarra un borde.
+            userSelect: 'none',
+            WebkitUserSelect: 'none',
           }}
         >
           <div
